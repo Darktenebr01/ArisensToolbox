@@ -1,0 +1,3402 @@
+-- ddbridge.lua  v1.26.0  (Dragon's Dogma 2 / REFramework)
+-- Command bridge for the "DD2 Bridge" Cheat Engine table.
+-- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
+-- The Cheat Engine table writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
+-- INSIDE the game through REFramework and writes the answer to resp.txt (big lists go to items.txt).
+-- Only the fixed commands listed in COMMANDS below are accepted - it never runs text as code.
+
+local TAG = "[ddbridge] "
+local DIR = "ddbridge/"
+local NAMES_FILE = "dd2_item_names.txt"
+
+local function try(f, ...) local ok, r = pcall(f, ...) if ok then return r end return nil end
+local function tname(o)
+  local td = try(function() return o:get_type_definition() end)
+  return td and td:get_full_name() or ""
+end
+
+---------------------------------------------------------------- file helpers
+local function rd(path)
+  if fs and fs.read then
+    local ok, r = pcall(fs.read, path)
+    if ok and type(r) == "string" then return r end
+  end
+  local ok, f = pcall(io.open, "reframework/data/" .. path, "r")
+  if ok and f then local t = f:read("*a") f:close() return t end
+  return nil
+end
+
+local function wr(path, text)
+  if fs and fs.write then
+    local ok = pcall(fs.write, path, text)
+    if ok then return true end
+  end
+  local ok, f = pcall(io.open, "reframework/data/" .. path, "w")
+  if ok and f then f:write(text) f:close() return true end
+  return false
+end
+
+local function split(s, sep)
+  local t = {}
+  for part in (s .. sep):gmatch("(.-)" .. sep:gsub("%p", "%%%0")) do t[#t + 1] = part end
+  return t
+end
+
+local function elems_of(arr)
+  local t = try(function() return arr:get_elements() end)
+  if t then return t end
+  local n = try(function() return arr:call("get_Length") end)
+      or try(function() return arr:call("get_Count") end) or 0
+  t = {}
+  for i = 0, n - 1 do
+    t[#t + 1] = try(function() return arr:call("GetValue", i) end)
+        or try(function() return arr:call("get_Item", i) end)
+  end
+  return t
+end
+
+local function find_method(td, name, ptypes)
+  if not td then return nil end
+  for _, m in ipairs(td:get_methods()) do
+    if m:get_name() == name then
+      local types = try(function() return m:get_param_types() end)
+      if types and #types == #ptypes then
+        local match = true
+        for i, t in ipairs(types) do
+          if t:get_full_name() ~= ptypes[i] then match = false break end
+        end
+        if match then return m end
+      end
+    end
+  end
+  return nil
+end
+
+---------------------------------------------------------------- items
+local function load_names()
+  local names = {}
+  local text = rd(NAMES_FILE)
+  if text then
+    for id, name in text:gmatch('(%d+)[^%d:]*:%s*"([^"]*)"') do names[tonumber(id)] = name end
+  end
+  return names
+end
+
+local function build_items()
+  local im = sdk.get_managed_singleton("app.ItemManager")
+  if not im then error("ItemManager not available (load into the game first)") end
+  local names = load_names()
+  local items = {}
+  local function add(id, r)
+    local name = names[id]
+    if not name then
+      local n = try(function() return r:call("get_Name") end)
+      if type(n) == "string" and n ~= "" then name = n end
+    end
+    items[#items + 1] = { id = id, name = (name or "(unnamed)"):gsub("[\t\r\n]", " ") }
+  end
+  local dict = try(function() return im:get_field("_ItemDataDict") end)
+  if dict then
+    local entries = try(function() return dict:get_field("_entries") end)
+    local count = try(function() return dict:get_field("_count") end) or 0
+    if entries then
+      local els = elems_of(entries)
+      for i = 1, math.min(count, #els) do
+        local e = els[i]
+        local id = try(function() return e:get_field("key") end)
+        local r = try(function() return e:get_field("value") end)
+        if type(id) == "number" and type(r) == "userdata" then add(id, r) end
+      end
+    end
+  end
+  if #items == 0 then
+    local m = find_method(sdk.find_type_definition("app.ItemManager"), "getItemData", { "System.Int32" })
+    if not m then error("item table unreadable and getItemData not found") end
+    for id = 0, 40000 do
+      local r = try(function() return m:call(im, id) end)
+      if type(r) == "userdata" then add(id, r) end
+    end
+  end
+  table.sort(items, function(a, b) return a.id < b.id end)
+  local lines = {}
+  for _, it in ipairs(items) do lines[#lines + 1] = it.id .. "\t" .. it.name end
+  if not wr(DIR .. "items.txt", table.concat(lines, "\n")) then error("could not write items.txt") end
+  return #items
+end
+
+local function give_item(id, qty, to_storage)
+  local im = sdk.get_managed_singleton("app.ItemManager")
+  if not im then error("ItemManager not available") end
+  local td = sdk.find_type_definition("app.ItemManager")
+  if to_storage then
+    local m = find_method(td, "forceGetItemToWarehouse", { "System.Int32", "System.Int32" })
+    if not m then error("forceGetItemToWarehouse not found") end
+    m:call(im, id, qty)
+    return "sent to storage"
+  end
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+  if not player then error("player not found") end
+  local m = find_method(td, "getItem", { "System.Int32", "System.Int32", "app.Character" })
+  if not m then error("getItem not found") end
+  m:call(im, id, qty, player)
+  return "given"
+end
+
+---------------------------------------------------------------- main pawn contexts
+-- v1.3: "the pawn" every pawn command works on = the one picked with select_pawn (default: main pawn)
+local PW = { list = {}, sel = nil }
+
+local function current_pawn(pm)
+  if PW.sel then
+    local e = PW.list[PW.sel]
+    if e and try(function() return e.src:get_address() end) then return e.src end
+  end
+  return try(function() return pm:call("get_MainPawn") end)
+end
+
+local function human_from(o)
+  local t = tname(o)
+  if t == "app.Human" then return o end
+  if t == "app.Character" then return try(function() return o:call("get_Human") end) end
+end
+
+local function find_human(pawn)
+  for _, n in ipairs({ "get_Human", "get_Chara", "get_Character", "get_CachedCharacter" }) do
+    local o = try(function() return pawn:call(n) end)
+    if type(o) == "userdata" then
+      local h = human_from(o)
+      if h then return h end
+    end
+  end
+  for _, m in ipairs(pawn:get_type_definition():get_methods() or {}) do
+    local n = m:get_name()
+    if n:sub(1, 4) == "get_" and #(m:get_param_types() or {}) == 0 then
+      local o = try(function() return pawn:call(n) end)
+      if type(o) == "userdata" then
+        local h = human_from(o)
+        if h then return h end
+      end
+    end
+  end
+end
+
+local function find_context(human, typename)
+  local holder = try(function() return human:call("get_Context") end)
+  local dict = holder and (try(function() return holder:get_field("Contexts") end)
+      or try(function() return holder:call("get_Contexts") end))
+  local entries = dict and try(function() return dict:get_field("_entries"):get_elements() end)
+  for _, e in ipairs(entries or {}) do
+    local val = try(function() return e:get_field("value") end)
+    if type(val) == "userdata" then
+      local cur = try(function() return val:get_field("<CurrentContext>k__BackingField") end)
+          or try(function() return val:call("get_CurrentContext") end)
+      if cur and tname(cur) == typename then return cur end
+    end
+  end
+end
+
+local function pawn_ctx()
+  local pm = sdk.get_managed_singleton("app.PawnManager")
+  if not pm then error("PawnManager not found (load into a save first)") end
+  local pawn = current_pawn(pm)
+  if not pawn then error("no pawn selected / no main pawn") end
+  local h = find_human(pawn)
+  if not h then error("could not find the selected pawn's Human") end
+  return {
+    pm = pm, human = h,
+    pdata = try(function() return h:call("get_PawnDataContext") end),
+    counts = find_context(h, "app.PawnCountDataContext"),
+  }
+end
+
+local function enum_by_val(typename)
+  local t = {}
+  local td = sdk.find_type_definition(typename)
+  for _, f in ipairs(td and td:get_fields() or {}) do
+    if f:is_static() then
+      local ok, v = pcall(f.get_data, f, nil)
+      if ok and type(v) == "number" then t[v] = f:get_name() end
+    end
+  end
+  return t
+end
+
+local function badge_quotas(pm)
+  local q = {}
+  local bd = try(function() return pm:call("get_PawnBadgeData") end) or try(function() return pm:get_field("_PawnBadgeData") end)
+  local list = bd and (try(function() return bd:get_field("_DataList") end) or try(function() return bd:call("get_DataList") end))
+  for _, e in ipairs(list and elems_of(list) or {}) do
+    local id = try(function() return e:get_field("_ID") end)
+    local c = try(function() return e:get_field("_Count") end)
+    if id then q[id] = c end
+  end
+  return q
+end
+
+local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
+
+---------------------------------------------------------------- commands
+-- each command gets the argument list (strings) and returns a one-line string payload
+local COMMANDS = {}
+
+COMMANDS.ping = function() return "pong ddbridge 1.26.0" end
+
+COMMANDS.list_items = function() return tostring(build_items()) end
+
+COMMANDS.give_item = function(a)
+  local id, qty, st = tonumber(a[1]), tonumber(a[2]), a[3] == "1"
+  if not id or not qty or qty < 1 then error("bad arguments") end
+  return give_item(math.floor(id), math.floor(qty), st)
+end
+
+COMMANDS.get_rating = function()
+  local c = pawn_ctx()
+  if not c.pdata then error("PawnDataContext not found") end
+  return tostring(c.pdata:call("get_GoodReviewNum")) .. "," .. tostring(c.pdata:call("get_LikeReviewNum"))
+end
+
+COMMANDS.set_rating = function(a)
+  local good, like = tonumber(a[1]), tonumber(a[2])
+  if not good or not like then error("bad arguments") end
+  local c = pawn_ctx()
+  if not c.pdata then error("PawnDataContext not found") end
+  c.pdata:call("setGoodReviewNum", math.floor(good))
+  c.pdata:call("setLikeReviewNum", math.floor(like))
+  return "ok"
+end
+
+COMMANDS.get_badges = function()
+  local c = pawn_ctx()
+  if not c.counts then error("PawnCountDataContext not found") end
+  local q = badge_quotas(c.pm)
+  local names = enum_by_val("app.PawnDefine.BadgeID")
+  local out = {}
+  for n = 1, 50 do
+    local cur = try(function() return c.counts:get_field(string.format("_PB%03dCount", n)) end)
+    if type(cur) == "number" then
+      local id = 2 ^ (n - 1)
+      out[#out + 1] = string.format("%d,%d,%s,%s", n, cur, tostring(q[id] or "?"),
+        tostring(names[id] or ("badge " .. n)):gsub("[,;|]", " "))
+    end
+  end
+  return table.concat(out, ";")
+end
+
+COMMANDS.set_badge = function(a)
+  local n, v = tonumber(a[1]), tonumber(a[2])
+  if not n or not v or n < 1 or n > 50 or v < 0 then error("bad arguments") end
+  local c = pawn_ctx()
+  if not c.counts then error("PawnCountDataContext not found") end
+  local f = string.format("_PB%03dCount", math.floor(n))
+  if type(try(function() return c.counts:get_field(f) end)) ~= "number" then error("no field " .. f) end
+  c.counts:set_field(f, math.floor(v))
+  return "ok"
+end
+
+COMMANDS.fill_badges = function()
+  local c = pawn_ctx()
+  if not c.counts then error("PawnCountDataContext not found") end
+  local q = badge_quotas(c.pm)
+  local n_done = 0
+  for n = 1, 50 do
+    local f = string.format("_PB%03dCount", n)
+    local cur = try(function() return c.counts:get_field(f) end)
+    local quota = q[2 ^ (n - 1)]
+    if type(cur) == "number" and quota then c.counts:set_field(f, quota) n_done = n_done + 1 end
+  end
+  return tostring(n_done)
+end
+
+COMMANDS.grant_badge = function(a)
+  local n = tonumber(a[1])
+  if not n or n < 1 or n > 50 then error("bad arguments") end
+  local c = pawn_ctx()
+  if not c.pdata then error("PawnDataContext not found") end
+  c.pdata:call("addBadge", toint(2 ^ (math.floor(n) - 1)))
+  return "ok"
+end
+
+-- a native function address comes back as a raw pointer (light userdata), not a Lua number
+local function ptr_to_hex(p)
+  if type(p) == "number" then return string.format("%X", p) end
+  local n = try(function() return sdk.to_int64(p) end)
+  if type(n) == "number" then return string.format("%X", n) end
+  local str = tostring(p)
+  local h = str:match("0[xX](%x+)") or str:match(":%s*(%x+)%s*$")
+  if h then return (h:gsub("^0+(%x)", "%1")):upper() end
+  error("cannot convert pointer: " .. str)
+end
+
+-- address of a method's native function (used by the table's signature harvester)
+COMMANDS.fn_addr = function(a)
+  local td = sdk.find_type_definition(a[1] or "")
+  if not td then error("type not found: " .. tostring(a[1])) end
+  local want = tonumber(a[3])
+  for _, m in ipairs(td:get_methods()) do
+    if m:get_name() == a[2] and (not want or #(m:get_param_types() or {}) == want) then
+      local fn = try(function() return m:get_function() end)
+      if fn == nil then error("get_function not available") end
+      return ptr_to_hex(fn)
+    end
+  end
+  error("method not found: " .. tostring(a[2]))
+end
+
+---------------------------------------------------------------- v1.1 shared helpers
+local function int(v)
+  local n = tonumber(v)
+  if not n then error("bad number: " .. tostring(v)) end
+  return math.floor(n)
+end
+
+local function clean(s) return (tostring(s):gsub("[\t\r\n|;,]", " ")) end
+
+local function fmt_int(v)
+  return tostring((math.tointeger and math.tointeger(v)) or v)
+end
+
+local function dict_iter(d, fn)
+  if not d then return end
+  local entries = try(function() return d:get_field("_entries") end)
+  local count = try(function() return d:get_field("_count") end) or 0
+  if not entries then return end
+  local els = elems_of(entries)
+  for i = 1, math.min(count, #els) do
+    local e = els[i]
+    local k = try(function() return e:get_field("key") end)
+    local v = try(function() return e:get_field("value") end)
+    if v ~= nil and k ~= nil then fn(k, v) end
+  end
+end
+
+-- overload-safe call: pick the method by name, parameter count and a substring of the 1st parameter type
+local function call_ov(obj, name, first_sub, nparams, ...)
+  local found
+  for _, m in ipairs(obj:get_type_definition():get_methods() or {}) do
+    if m:get_name() == name then
+      local pts = m:get_param_types() or {}
+      if #pts == nparams then
+        local ok = true
+        if first_sub then
+          local n = try(function() return pts[1]:get_full_name() end) or ""
+          if not n:find(first_sub, 1, true) or n:find("IEnumerable", 1, true) then ok = false end
+        end
+        if ok then found = m break end
+      end
+    end
+  end
+  if not found then error("method not found: " .. name) end
+  return found:call(obj, ...)
+end
+
+local function follow(obj, path)
+  for _, n in ipairs(path) do
+    if type(obj) ~= "userdata" then return nil end
+    obj = try(function() return obj:get_field(n) end)
+  end
+  return obj
+end
+
+local function enum_list(typename)
+  local out = {}
+  local td = sdk.find_type_definition(typename)
+  for _, f in ipairs(td and td:get_fields() or {}) do
+    if f:is_static() then
+      local ok, v = pcall(f.get_data, f, nil)
+      if ok and type(v) == "number" then out[#out + 1] = { name = f:get_name(), value = v } end
+    end
+  end
+  table.sort(out, function(a, b) return a.value < b.value end)
+  return out
+end
+
+local function job_of(name)
+  local j = name:match("^Job(%d%d)_")
+  return j and tonumber(j)
+end
+
+local ENUMS = {
+  { "custom", "app.HumanCustomSkillID" },
+  { "normal", "app.HumanNormalSkillID" },
+  { "ability", "app.HumanAbilityID" },
+  { "badge", "app.PawnDefine.BadgeID" },
+  { "level", "app.HumanCustomSkillLevelNo" },
+  { "equipskill", "app.EquipmentAbilityID" },
+  { "enhance", "app.EnhanceType" },
+}
+
+---------------------------------------------------------------- v1.3 all pawns
+local function coll_elems(c)
+  local out = {}
+  local items = try(function() return c:get_field("_items") end)
+  if items then
+    local size = try(function() return c:get_field("_size") end) or 0
+    local els = elems_of(items)
+    for i = 1, math.min(size, #els) do if els[i] ~= nil then out[#out + 1] = els[i] end end
+    return out
+  end
+  if try(function() return c:get_field("_entries") end) then
+    dict_iter(c, function(_, v) if type(v) == "userdata" then out[#out + 1] = v end end)
+    return out
+  end
+  local t = try(function() return c:get_elements() end)
+  if t then for _, e in ipairs(t) do if e ~= nil then out[#out + 1] = e end end end
+  return out
+end
+
+local function pawn_label(e, is_main)
+  local h = e.human
+  local name
+  for _, n in ipairs({ "get_Name", "get_PawnName", "get_CharaName" }) do
+    name = try(function() return e.src:call(n) end) or try(function() return h:call(n) end)
+    if type(name) == "string" and name ~= "" then break end
+    name = nil
+  end
+  local st = try(function() return h:call("get_StatusContext") end)
+  local jc = try(function() return h:call("get_JobContext") end)
+  local lvl = st and try(function() return st:call("get_Level") end)
+  local job = jc and try(function() return jc:call("get_Job") end)
+  return clean(string.format("%s%s  Lv %s  job %s", is_main and "[MAIN] " or "", name or tname(e.src):gsub("^app%.", ""),
+    tostring(lvl or "?"), tostring(job or "?")))
+end
+
+-- finds every pawn object reachable from PawnManager / CharacterManager collections; logs what it scanned
+COMMANDS.list_pawns = function()
+  local pm = sdk.get_managed_singleton("app.PawnManager")
+  if not pm then error("PawnManager not found (load into a save first)") end
+  local main = try(function() return pm:call("get_MainPawn") end)
+  local main_addr = main and try(function() return main:get_address() end)
+  local found, seen = {}, {}
+  local function consider(e, where)
+    if type(e) ~= "userdata" then return end
+    local tn = tname(e)
+    if not tn:find("Pawn", 1, true) then return end
+    local h = try(function() return human_from(e) or find_human(e) end)
+    if not h then return end
+    local ha = try(function() return h:get_address() end)
+    if ha and seen[ha] then return end
+    if ha then seen[ha] = true end
+    found[#found + 1] = { src = e, human = h, where = where, main = (main_addr ~= nil and try(function() return e:get_address() end) == main_addr) }
+  end
+  if main then consider(main, "get_MainPawn") end
+  for _, sname in ipairs({ "app.PawnManager", "app.CharacterManager" }) do
+    local mgr = sdk.get_managed_singleton(sname)
+    local td = mgr and mgr:get_type_definition()
+    while td do
+      for _, f in ipairs(td:get_fields() or {}) do
+        if not f:is_static() then
+          local n = f:get_name()
+          local v = try(function() return mgr:get_field(n) end)
+          if type(v) == "userdata" then
+            local tn = tname(v)
+            if tn:find("List", 1, true) or tn:find("Dictionary", 1, true) or tn:find("[]", 1, true) or n:lower():find("pawn", 1, true) then
+              local els = coll_elems(v)
+              if #els > 0 then
+                log.info(TAG .. "pawns: " .. sname .. " field " .. n .. " (" .. tn .. ") n=" .. #els .. " first=" .. tname(els[1]))
+                for _, e in ipairs(els) do consider(e, sname .. "." .. n) end
+              end
+            end
+          end
+        end
+      end
+      for _, m in ipairs(td:get_methods() or {}) do
+        local n = m:get_name()
+        local ln = n:lower()
+        if n:sub(1, 4) == "get_" and #(m:get_param_types() or {}) == 0 and ln:find("pawn", 1, true)
+            and not ln:find("main", 1, true) then
+          local v = try(function() return mgr:call(n) end)
+          if type(v) == "userdata" then
+            local tn = tname(v)
+            local els = (tn:find("List", 1, true) or tn:find("Dictionary", 1, true) or tn:find("[]", 1, true)) and coll_elems(v) or { v }
+            if #els > 0 then
+              log.info(TAG .. "pawns: " .. sname .. " method " .. n .. " (" .. tn .. ") n=" .. #els .. " first=" .. tname(els[1]))
+              for _, e in ipairs(els) do consider(e, sname .. "." .. n) end
+            end
+          end
+        end
+      end
+      td = try(function() return td:get_parent_type() end)
+    end
+  end
+  table.sort(found, function(x, y) return x.main and not y.main end)
+  PW.list = found
+  local out = {}
+  for i, e in ipairs(found) do
+    local lab = pawn_label(e, e.main)
+    log.info(TAG .. "pawns: #" .. i .. " " .. lab .. " via " .. e.where)
+    out[#out + 1] = i .. "," .. lab
+  end
+  if #found == 0 then error("no pawns found - see the [ddbridge] pawns lines in the REFramework log") end
+  return table.concat(out, ";")
+end
+
+-- arg: index into the last list_pawns result (0 = main pawn). Every pawn command then targets that pawn.
+COMMANDS.select_pawn = function(a)
+  local i = int(a[1])
+  if i == 0 then PW.sel = nil return "main pawn" end
+  if not PW.list[i] then error("pawn not in the list - refresh the pawn list") end
+  PW.sel = i
+  return "selected pawn #" .. i
+end
+
+---------------------------------------------------------------- v1.1 target (main pawn or the player)
+local hcache = {}
+
+local function get_target(kind)
+  local src
+  if kind == "player" then
+    local cm = sdk.get_managed_singleton("app.CharacterManager")
+    if not cm then error("CharacterManager not found (load into the game first)") end
+    for _, g in ipairs({ "get_ManualPlayer", "getManualPlayer", "get_ManualPlayerNoCheck" }) do
+      src = try(function() return cm:call(g) end)
+      if src then break end
+    end
+    if not src then error("player not found") end
+  else
+    local pm = sdk.get_managed_singleton("app.PawnManager")
+    if not pm then error("PawnManager not found (load into a save first)") end
+    src = current_pawn(pm)
+    if not src then error("no pawn selected / no main pawn") end
+  end
+  local addr = try(function() return src:get_address() end)
+  local c = hcache[kind]
+  if not (c and c.addr == addr and c.human) then
+    c = { addr = addr, human = human_from(src) or find_human(src) }
+    hcache[kind] = c
+  end
+  local h = c.human
+  if not h then error("could not find the " .. tostring(kind) .. "'s Human") end
+  local skill = try(function() return h:call("get_SkillContext") end)
+  if not skill then hcache[kind] = nil error("SkillContext missing (character reloading?)") end
+  return {
+    kind = kind, src = src, human = h, skill = skill,
+    ability = try(function() return h:call("get_AbilityContext") end),
+    job = try(function() return h:call("get_JobContext") end),
+    status = try(function() return h:call("get_StatusContext") end),
+    pdata = try(function() return h:call("get_PawnDataContext") end),
+    mdata = kind ~= "player" and try(function() return src:call("get_MainPawnDataContext") end) or nil,
+  }
+end
+
+---------------------------------------------------------------- v1.1 enums
+COMMANDS.list_enums = function()
+  local lines = {}
+  for _, e in ipairs(ENUMS) do
+    for _, ent in ipairs(enum_list(e[2])) do
+      lines[#lines + 1] = e[1] .. "\t" .. fmt_int(ent.value) .. "\t" .. ent.name
+    end
+  end
+  if not wr(DIR .. "enums.txt", table.concat(lines, "\n")) then error("could not write enums.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.1 weapon skills
+COMMANDS.get_wskills = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local t = {}
+  for slot = 0, 5 do
+    t[#t + 1] = fmt_int(try(function() return c.skill:call("getSkillID", job, slot) end) or 0)
+  end
+  return table.concat(t, ",")
+end
+
+-- args: target, job, slot, skill id, unlock level (-1 = do not auto-unlock)
+COMMANDS.set_wskill = function(a)
+  local c = get_target(a[1])
+  local job, slot, id, lvl = int(a[2]), int(a[3]), int(a[4]), int(a[5])
+  if lvl >= 0 and id ~= 0 then
+    local en = try(function() return c.skill:call("isCustomSkillEnable", id) end)
+    if en == false then
+      try(function() call_ov(c.skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, id, lvl) end)
+    end
+  end
+  c.skill:call("setSkill", job, id, slot)
+  return "ok"
+end
+
+COMMANDS.clear_wskills = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  for slot = 0, 5 do c.skill:call("setSkill", job, 0, slot) end
+  return "ok"
+end
+
+-- args: target, job (0 = every vocation), level
+COMMANDS.unlock_wskills = function(a)
+  local c = get_target(a[1])
+  local job, lvl = int(a[2]), int(a[3])
+  local n, total = 0, 0
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+    if ent.value ~= 0 and (job == 0 or job_of(ent.name) == job) then
+      total = total + 1
+      if pcall(call_ov, c.skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, ent.value, lvl) then n = n + 1 end
+    end
+  end
+  return n .. "/" .. total
+end
+
+COMMANDS.unlock_wskill = function(a)
+  local c = get_target(a[1])
+  call_ov(c.skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, int(a[2]), int(a[3]))
+  return "ok"
+end
+
+-- rows "id,enabled,level;..." for the weapon skills of one vocation
+COMMANDS.get_wstate = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local out = {}
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+    if ent.value ~= 0 and job_of(ent.name) == job then
+      local en = try(function() return c.skill:call("isCustomSkillEnable", ent.value) end)
+      local lv = try(function() return c.skill:call("getCustomSkillLevel", ent.value) end)
+      out[#out + 1] = fmt_int(ent.value) .. "," .. tostring(en) .. "," .. tostring(lv)
+    end
+  end
+  return table.concat(out, ";")
+end
+
+---------------------------------------------------------------- v1.4 weapon skill level / upgrade probe
+-- Finds out, from the game itself, which read-only SkillContext functions describe a weapon skill
+-- (max level, upgraded/enhanced flag, ...) by calling every getter that takes a HumanCustomSkillID,
+-- for every skill of the vocation. Results go to wskill_info.txt and to the REFramework log.
+local function probe_name_ok(ln)
+  return ln:match("^get") or ln:match("^is") or ln:match("^can") or ln:match("^has") or ln:match("^need") or ln:match("^check")
+end
+
+COMMANDS.wskill_probe = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local meths, seen, interesting = {}, {}, {}
+  local t = c.skill:get_type_definition()
+  log.info(TAG .. "wskill_probe: SkillContext type " .. tostring(t:get_full_name()))
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local n = m:get_name()
+      local ln = n:lower()
+      local pts = m:get_param_types() or {}
+      if ln:find("level", 1, true) or ln:find("enhance", 1, true) or ln:find("upgrade", 1, true)
+          or ln:find("awaken", 1, true) or ln:find("max", 1, true) or ln:find("rank", 1, true) then
+        local ps = {}
+        for _, p in ipairs(pts) do ps[#ps + 1] = try(function() return p:get_full_name() end) or "?" end
+        local rt = try(function() return m:get_return_type():get_full_name() end) or "?"
+        log.info(TAG .. "wskill_probe: ctx method " .. n .. "(" .. table.concat(ps, ", ") .. ") -> " .. rt)
+        interesting[#interesting + 1] = n
+      end
+      if #pts == 1 and not seen[n] and probe_name_ok(ln) then
+        local pn = try(function() return pts[1]:get_full_name() end) or ""
+        if pn:find("HumanCustomSkillID", 1, true) then
+          seen[n] = true
+          meths[#meths + 1] = { name = n, m = m }
+        end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  for _, td in ipairs({ "app.HumanCustomSkillLevelNo" }) do
+    for _, ent in ipairs(enum_list(td)) do
+      log.info(TAG .. "wskill_probe: enum " .. td .. " " .. ent.name .. " = " .. fmt_int(ent.value))
+    end
+  end
+  table.sort(meths, function(x, y) return x.name < y.name end)
+  local lines = {}
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+    if ent.value ~= 0 and (job == 0 or job_of(ent.name) == job) then
+      local parts = {}
+      for _, mm in ipairs(meths) do
+        local ok, v = pcall(function() return mm.m:call(c.skill, ent.value) end)
+        if ok and (type(v) == "number" or type(v) == "boolean") then
+          parts[#parts + 1] = (mm.name:gsub("CustomSkill", ""):gsub("^get", "")) .. "=" .. tostring(v)
+        end
+      end
+      local row = fmt_int(ent.value) .. "\t" .. ent.name .. "\t" .. table.concat(parts, " ")
+      lines[#lines + 1] = row
+      log.info(TAG .. "wskill_probe: " .. row)
+    end
+  end
+  if not wr(DIR .. "wskill_info.txt", table.concat(lines, "\n")) then error("could not write wskill_info.txt") end
+  local names = {}
+  for _, mm in ipairs(meths) do names[#names + 1] = mm.name end
+  return string.format("%d skills, %d getters (%s); %d level/enhance-related methods logged",
+    #lines, #meths, table.concat(names, " "), #interesting)
+end
+
+---------------------------------------------------------------- v1.5 set the level of ONE weapon skill (verified)
+-- args: target, skill id, level. Uses a dedicated "set...CustomSkillLevel(id, level)" if the game has one,
+-- then setCustomSkillEnable(id, level), and finally reads the level back so you see what really happened.
+COMMANDS.set_wlevel = function(a)
+  local c = get_target(a[1])
+  local id, lvl = int(a[2]), int(a[3])
+  local before = try(function() return c.skill:call("getCustomSkillLevel", id) end)
+  local used = {}
+  local t = c.skill:get_type_definition()
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local n = m:get_name()
+      local pts = m:get_param_types() or {}
+      if n:sub(1, 3) == "set" and n:lower():find("customskilllevel", 1, true) and #pts == 2 then
+        local p1 = try(function() return pts[1]:get_full_name() end) or ""
+        log.info(TAG .. "set_wlevel: candidate " .. n .. "(" .. p1 .. ", ...)")
+        if p1:find("HumanCustomSkillID", 1, true) and pcall(function() m:call(c.skill, id, lvl) end) then
+          used[#used + 1] = n
+        end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  if pcall(call_ov, c.skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, id, lvl) then
+    used[#used + 1] = "setCustomSkillEnable"
+  end
+  local after = try(function() return c.skill:call("getCustomSkillLevel", id) end)
+  return string.format("requested level %d: game now reports %s (was %s) via %s%s", lvl, tostring(after), tostring(before),
+    #used > 0 and table.concat(used, "+") or "nothing", (after == lvl) and "" or "  - NOT applied: the game keeps its own rule for this skill")
+end
+
+---------------------------------------------------------------- v1.1 core skills
+COMMANDS.get_nstate = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local out = {}
+  for _, ent in ipairs(enum_list("app.HumanNormalSkillID")) do
+    if ent.value ~= 0 then
+      local j = job_of(ent.name)
+      if j == job or j == nil then
+        local en = try(function() return c.skill:call("isNormalSkillEnable", ent.value) end)
+        out[#out + 1] = fmt_int(ent.value) .. "," .. tostring(en) .. "," .. (j == nil and "other" or "voc")
+      end
+    end
+  end
+  return table.concat(out, ";")
+end
+
+COMMANDS.enable_nskill = function(a)
+  local c = get_target(a[1])
+  call_ov(c.skill, "setNormalSkillEnable", "HumanNormalSkillID", 1, int(a[2]))
+  return "ok"
+end
+
+COMMANDS.enable_nskills = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local incl_other = (a[3] == "all")
+  local set, total, verified, failed = 0, 0, 0, {}
+  for _, ent in ipairs(enum_list("app.HumanNormalSkillID")) do
+    local j = job_of(ent.name)
+    if ent.value ~= 0 and (j == job or (incl_other and j == nil)) then
+      total = total + 1
+      if pcall(call_ov, c.skill, "setNormalSkillEnable", "HumanNormalSkillID", 1, ent.value) then set = set + 1 end
+      local en = try(function() return c.skill:call("isNormalSkillEnable", ent.value) end)
+      if en == true then verified = verified + 1 else failed[#failed + 1] = ent.name end
+    end
+  end
+  local r = set .. "/" .. total .. " set, " .. verified .. " read back enabled"
+  if #failed > 0 then r = r .. "; NOT enabled: " .. table.concat(failed, " ") end
+  return r
+end
+
+---------------------------------------------------------------- v1.1 augments
+COMMANDS.get_augments = function(a)
+  local c = get_target(a[1])
+  if not c.ability then error("AbilityContext not found") end
+  local job = int(a[2])
+  local t = {}
+  for slot = 0, 5 do
+    t[#t + 1] = fmt_int(try(function() return c.ability:call("getAbility", job, slot) end) or 0)
+  end
+  return table.concat(t, ",")
+end
+
+COMMANDS.set_augment = function(a)
+  local c = get_target(a[1])
+  if not c.ability then error("AbilityContext not found") end
+  c.ability:call("setAbility", int(a[2]), int(a[4]), int(a[3]))   -- target, job, slot, id
+  return "ok"
+end
+
+COMMANDS.unlock_augments = function(a)
+  local c = get_target(a[1])
+  if not c.ability then error("AbilityContext not found") end
+  local job = int(a[2])
+  local incl_other = (a[3] == "all")
+  local n, total = 0, 0
+  for _, ent in ipairs(enum_list("app.HumanAbilityID")) do
+    local j = job_of(ent.name)
+    if ent.value ~= 0 and (j == job or (incl_other and j == nil)) then
+      total = total + 1
+      if pcall(call_ov, c.ability, "setAbilityEnable", "HumanAbilityID", 1, ent.value) then n = n + 1 end
+    end
+  end
+  return n .. "/" .. total
+end
+
+-- v1.14.1: every app.HumanAbilityID entry (augments), including ones without a JobNN_ prefix that the lists used to hide
+COMMANDS.augment_dump = function(a)
+  local c = get_target(a[1])
+  if not c.ability then error("AbilityContext not found") end
+  local job = int(a[2])
+  local lines = {}
+  lines[#lines + 1] = "target = " .. tostring(a[1]) .. "   vocation = " .. tostring(job)
+  local cur = {}
+  for slot = 0, 5 do cur[#cur + 1] = fmt_int(try(function() return c.ability:call("getAbility", job, slot) end) or 0) end
+  lines[#lines + 1] = "equipped augment ids (slots 1-6): " .. table.concat(cur, ",")
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "id\tname\tjob\tenabled"
+  for _, ent in ipairs(enum_list("app.HumanAbilityID")) do
+    local en = try(function() return c.ability:call("isAbilityEnable", ent.value) end)
+    lines[#lines + 1] = string.format("%d\t%s\t%s\t%s", ent.value, ent.name, tostring(job_of(ent.name) or "none"), tostring(en))
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "AbilityContext methods mentioning ability / enable:"
+  local t, seen = c.ability:get_type_definition(), {}
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local k = m:get_name() .. "(" .. #(m:get_param_types() or {}) .. ")"
+      if not seen[k] then seen[k] = true lines[#lines + 1] = "   M " .. k end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  if not wr(DIR .. "augdump.txt", table.concat(lines, "\n")) then error("could not write augdump.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.1 level / exp / favorability / equipped badge
+COMMANDS.get_info = function(a)
+  local c = get_target(a[1])
+  local job = c.job and try(function() return c.job:call("get_Job") end)
+  local lvl = c.status and try(function() return c.status:call("get_Level") end)
+  return tostring(job or "?") .. "," .. tostring(lvl or "?")
+end
+
+COMMANDS.set_level = function(a)
+  local c = get_target(a[1])
+  if not c.status then error("StatusContext not found") end
+  c.status:call("set_Level", int(a[2]))
+  return "ok"
+end
+
+COMMANDS.add_job_exp = function(a)
+  local c = get_target(a[1])
+  if not c.job then error("JobContext not found") end
+  call_ov(c.job, "addJobExp", nil, 1, int(a[2]))
+  return "ok"
+end
+
+COMMANDS.get_fav = function()
+  local c = get_target("pawn")
+  if not c.mdata then error("MainPawnDataContext not found") end
+  return tostring(c.mdata:call("get_FavorabilityRating"))
+end
+
+COMMANDS.set_fav = function(a)
+  local v = tonumber(a[1])
+  if not v then error("bad arguments") end
+  local c = get_target("pawn")
+  if not c.mdata then error("MainPawnDataContext not found") end
+  c.mdata:call("setFavorabilityRating", v + 0.0)
+  return "ok"
+end
+
+COMMANDS.badge_equip = function(a)
+  local n = int(a[1])
+  if n < 1 or n > 50 then error("bad arguments") end
+  local c = pawn_ctx()
+  if not c.pdata then error("PawnDataContext not found") end
+  c.pdata:call("setBadge", toint(2 ^ (n - 1)))
+  return "ok"
+end
+
+---------------------------------------------------------------- v1.1 stats (base values) + search
+local FRIENDLY = {
+  BasicAttack = "Strength (base)", BasicDefence = "Defense (base)",
+  BasicMagicAttack = "Magick (base)", BasicMagicDefence = "Magick Defense (base)",
+  Blow = "Knockdown Power (base)", _Exp = "Experience",
+  RemainingAmount = "Stamina (current)", ReducedMaxValue = "Stamina (max)",
+  ReducedMaxHp = "Health (max)",
+}
+
+local function core_groups(c)
+  local H = c.human
+  local chara = follow(H, { "<Chara>k__BackingField" })
+  local function g(title, obj) return { title = title, obj = type(obj) == "userdata" and obj or nil } end
+  return {
+    g("Combat stats", follow(chara, { "<DamageCalculator>k__BackingField", "Status" })),
+    g("Experience", follow(chara, { "<Context>k__BackingField", "HumanStatusContext" })),
+    g("Stamina", follow(H, { "<RecoverInteractCtrl>k__BackingField", "StaminaContext" })),
+    g("Health", follow(chara, { "<NavigationAI>k__BackingField", "<AIBlackBoard>k__BackingField",
+      "<TalkController>k__BackingField", "<OwnerHitController>k__BackingField" })),
+  }
+end
+
+local function numeric_fields(obj)
+  local out, seen = {}, {}
+  local td = obj:get_type_definition()
+  while td do
+    for _, f in ipairs(td:get_fields() or {}) do
+      if not f:is_static() then
+        local n = f:get_name()
+        if not seen[n] then
+          seen[n] = true
+          local v = try(function() return obj:get_field(n) end)
+          if type(v) == "number" then out[#out + 1] = n end
+        end
+      end
+    end
+    td = try(function() return td:get_parent_type() end)
+  end
+  table.sort(out, function(x, y) return x:lower() < y:lower() end)
+  return out
+end
+
+local LOCKS = {}   -- key -> { obj=, e={kind=,name=}, v= }
+
+local function stat_read(obj, e)
+  if e.kind == "f" then return try(function() return obj:get_field(e.name) end) end
+  return try(function() return obj:call("get_" .. e.name) end)
+end
+
+local function stat_write(obj, e, v)
+  if e.kind == "f" then obj:set_field(e.name, v) else obj:call("set_" .. e.name, v) end
+end
+
+local function typed_value(cur, text)
+  local n = tonumber(text)
+  if not n then error("bad value") end
+  if math.type(cur) == "float" then return n + 0.0 end
+  return math.floor(n)
+end
+
+local function set_lock(key, obj, e, v, on)
+  if on then LOCKS[key] = { obj = obj, e = e, v = v } else LOCKS[key] = nil end
+end
+
+COMMANDS.get_core = function(a)
+  local c = get_target(a[1])
+  local lines = {}
+  for gi, grp in ipairs(core_groups(c)) do
+    if grp.obj then
+      for _, n in ipairs(numeric_fields(grp.obj)) do
+        local v = try(function() return grp.obj:get_field(n) end)
+        if type(v) == "number" then
+          local raw = n:gsub("^<(.+)>k__BackingField$", "%1")
+          local label = FRIENDLY[raw] and string.format("%s [%s]", FRIENDLY[raw], raw) or raw
+          lines[#lines + 1] = string.format("%d\t%s\t%s\t%s\t%s", gi, grp.title, n, clean(label), tostring(v))
+        end
+      end
+    end
+  end
+  if not wr(DIR .. "core.txt", table.concat(lines, "\n")) then error("could not write core.txt") end
+  return tostring(#lines)
+end
+
+-- args: target, group, field, value, lock(0/1)
+COMMANDS.set_core = function(a)
+  local c = get_target(a[1])
+  local gi = int(a[2])
+  local grp = core_groups(c)[gi]
+  if not grp or not grp.obj then error("group not found") end
+  local cur = grp.obj:get_field(a[3])
+  if type(cur) ~= "number" then error("no numeric field " .. tostring(a[3])) end
+  local nv = typed_value(cur, a[4])
+  grp.obj:set_field(a[3], nv)
+  set_lock(a[1] .. ":core" .. gi .. ":" .. a[3], grp.obj, { kind = "f", name = a[3] }, nv, a[5] == "1")
+  return "ok"
+end
+
+COMMANDS.clear_locks = function()
+  local n = 0
+  for k in pairs(LOCKS) do LOCKS[k] = nil n = n + 1 end
+  return tostring(n)
+end
+
+-- stat search over every context of the character (same idea as the REFramework editor)
+local scache = {}
+
+local NUMT = {
+  ["System.Int32"] = true, ["System.UInt32"] = true, ["System.Int64"] = true,
+  ["System.UInt64"] = true, ["System.Single"] = true, ["System.Double"] = true,
+  ["System.Int16"] = true, ["System.UInt16"] = true, ["System.Byte"] = true,
+}
+
+local function stat_sources(c)
+  local addr = try(function() return c.human:get_address() end)
+  local sc = scache[c.kind]
+  if sc and sc.addr == addr then return sc.src end
+  for k in pairs(LOCKS) do if k:sub(1, #c.kind + 1) == c.kind .. ":" then LOCKS[k] = nil end end
+  local src, seen = {}, {}
+  local function add(label, o)
+    if type(o) ~= "userdata" then return end
+    local ad = try(function() return o:get_address() end)
+    if ad and seen[ad] then return end
+    if ad then seen[ad] = true end
+    src[#src + 1] = { label = label, obj = o }
+  end
+  add("Human", c.human)
+  add("StatusContext", c.status)
+  add("JobContext", c.job)
+  add("AbilityContext", c.ability)
+  add("PawnDataContext", c.pdata)
+  add("MainPawnDataContext", c.mdata)
+  for _, n in ipairs({ "get_Chara", "get_Character", "get_CachedCharacter" }) do
+    add(n:sub(5), try(function() return c.src:call(n) end))
+  end
+  local holder = try(function() return c.human:call("get_Context") end)
+  local dict = holder and (try(function() return holder:get_field("Contexts") end)
+      or try(function() return holder:call("get_Contexts") end))
+  local entries = dict and try(function() return dict:get_field("_entries"):get_elements() end)
+  for _, e in ipairs(entries or {}) do
+    local val = try(function() return e:get_field("value") end)
+    if type(val) == "userdata" then
+      local cur = try(function() return val:get_field("<CurrentContext>k__BackingField") end)
+          or try(function() return val:call("get_CurrentContext") end)
+      if type(cur) == "userdata" then add((tname(cur):gsub("^app%.", "")), cur) end
+    end
+  end
+  scache[c.kind] = { addr = addr, src = src }
+  return src
+end
+
+local function stat_entries(s)
+  if s.entries then return s.entries end
+  local list, seen = {}, {}
+  local td = s.obj:get_type_definition()
+  local methods, mseen = {}, {}
+  while td do
+    for _, f in ipairs(td:get_fields() or {}) do
+      if not f:is_static() then
+        local n = f:get_name()
+        if not seen["f" .. n] then
+          seen["f" .. n] = true
+          local v = try(function() return s.obj:get_field(n) end)
+          if type(v) == "number" then list[#list + 1] = { kind = "f", name = n } end
+        end
+      end
+    end
+    for _, m in ipairs(td:get_methods() or {}) do
+      local k = m:get_name() .. #(m:get_param_types() or {})
+      if not mseen[k] then mseen[k] = true methods[#methods + 1] = m end
+    end
+    td = try(function() return td:get_parent_type() end)
+  end
+  local setters = {}
+  for _, m in ipairs(methods) do
+    local n = m:get_name()
+    if n:sub(1, 4) == "set_" and #(m:get_param_types() or {}) == 1 then setters[n:sub(5)] = true end
+  end
+  for _, m in ipairs(methods) do
+    local n = m:get_name()
+    if n:sub(1, 4) == "get_" and #(m:get_param_types() or {}) == 0 and setters[n:sub(5)] then
+      local rt = try(function() return m:get_return_type():get_full_name() end)
+      if rt and NUMT[rt] and not seen["f" .. n:sub(5)] then list[#list + 1] = { kind = "p", name = n:sub(5) } end
+    end
+  end
+  table.sort(list, function(x, y) return x.name:lower() < y.name:lower() end)
+  s.entries = list
+  return list
+end
+
+local function stat_match(s, e, filter)
+  local v = stat_read(s.obj, e)
+  if filter:sub(1, 1) == "=" then
+    local want = tonumber(filter:sub(2))
+    return (want ~= nil and type(v) == "number" and math.abs(v - want) < 0.01), v
+  end
+  local lname = (s.label .. "." .. e.name):lower()
+  for tok in filter:lower():gmatch("[^,%s]+") do
+    if lname:find(tok, 1, true) then return true, v end
+  end
+  return false, v
+end
+
+-- args: target, filter, max rows
+COMMANDS.stat_search = function(a)
+  local c = get_target(a[1])
+  local filter = (a[2] or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if filter == "" then error("enter a filter") end
+  local maxrows = math.min(int(a[3] or 100), 400)
+  local lines, shown = {}, 0
+  for si, s in ipairs(stat_sources(c)) do
+    for _, e in ipairs(stat_entries(s)) do
+      if shown >= maxrows then break end
+      local ok, v = stat_match(s, e, filter)
+      if ok and type(v) == "number" then
+        shown = shown + 1
+        lines[#lines + 1] = string.format("%d\t%s\t%s\t%s\t%s", si, clean(s.label), e.kind, clean(e.name), tostring(v))
+      end
+    end
+  end
+  if not wr(DIR .. "stats.txt", table.concat(lines, "\n")) then error("could not write stats.txt") end
+  return tostring(shown)
+end
+
+-- args: target, source index, kind (f/p), name, value, lock(0/1)
+COMMANDS.stat_set = function(a)
+  local c = get_target(a[1])
+  local s = stat_sources(c)[int(a[2])]
+  if not s then error("source not found - search again") end
+  local e = { kind = a[3] == "p" and "p" or "f", name = a[4] }
+  local cur = stat_read(s.obj, e)
+  if type(cur) ~= "number" then error("field not readable") end
+  local nv = typed_value(cur, a[5])
+  stat_write(s.obj, e, nv)
+  set_lock(a[1] .. ":s" .. a[2] .. ":" .. a[4], s.obj, e, nv, a[6] == "1")
+  return "ok"
+end
+
+re.on_frame(function()
+  for _, l in pairs(LOCKS) do
+    local cur = stat_read(l.obj, l.e)
+    if type(cur) == "number" and cur ~= l.v then pcall(stat_write, l.obj, l.e, l.v) end
+  end
+end)
+
+---------------------------------------------------------------- v1.6 equipment-ability probe
+-- Special skills on weapons (Shearing Wind, Fanged Rupture, ...) are "equipment abilities". This lists every function on the
+-- character's contexts / managers that deals with EquipmentAbilityID, and calls the read-only ones for EVERY ability id.
+-- Run it WITH the item equipped: the ids that answer true are the ones the game currently treats as active.
+COMMANDS.eqability_probe = function(a)
+  local c = get_target(a[1])
+  local ids = enum_list("app.EquipmentAbilityID")
+  local sources, seenaddr = {}, {}
+  local function addsrc(label, obj)
+    if type(obj) ~= "userdata" then return end
+    local ad = try(function() return obj:get_address() end)
+    if ad and seenaddr[ad] then return end
+    if ad then seenaddr[ad] = true end
+    sources[#sources + 1] = { label = label, obj = obj }
+  end
+  addsrc("SkillContext", c.skill)
+  for _, s2 in ipairs(stat_sources(c)) do addsrc(s2.label, s2.obj) end
+  for _, n in ipairs({ "app.ItemManager", "app.CharacterManager", "app.PawnManager" }) do
+    addsrc((n:gsub("^app%.", "")), sdk.get_managed_singleton(n))
+  end
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  L("SOURCE\tKIND\tDETAIL")
+  L("(" .. #ids .. " EquipmentAbilityID values, " .. #sources .. " sources)")
+  for _, s2 in ipairs(sources) do
+    local td = try(function() return s2.obj:get_type_definition() end)
+    local seenm = {}
+    while td do
+      for _, m in ipairs(td:get_methods() or {}) do
+        local n = m:get_name()
+        local ln = n:lower()
+        local pts = m:get_param_types() or {}
+        local ps, uses = {}, false
+        for _, p in ipairs(pts) do
+          local pn = try(function() return p:get_full_name() end) or "?"
+          ps[#ps + 1] = pn
+          if pn:find("EquipmentAbilityID", 1, true) then uses = true end
+        end
+        local key = n .. "/" .. #pts
+        if (uses or ln:find("equipability", 1, true) or ln:find("equipmentability", 1, true)) and not seenm[key] then
+          seenm[key] = true
+          local rt = try(function() return m:get_return_type():get_full_name() end) or "?"
+          L(s2.label .. "\tMETHOD\t" .. n .. "(" .. table.concat(ps, ", ") .. ") -> " .. rt)
+          if #pts == 1 and uses and probe_name_ok(ln) then
+            local trues = {}
+            for _, e in ipairs(ids) do
+              local ok, v = pcall(function() return m:call(s2.obj, e.value) end)
+              if ok and (v == true or (type(v) == "number" and v ~= 0)) then
+                trues[#trues + 1] = e.name .. "=" .. tostring(v)
+              end
+            end
+            local shown = {}
+            for i = 1, math.min(#trues, 80) do shown[i] = trues[i] end
+            L(s2.label .. "\tTRUE-FOR\t" .. n .. " (" .. #trues .. " ids): " .. table.concat(shown, " ")
+              .. (#trues > 80 and " ..." or ""))
+          end
+        end
+      end
+      td = try(function() return td:get_parent_type() end)
+    end
+  end
+  for _, l in ipairs(lines) do log.info(TAG .. "eqability: " .. l) end
+  if not wr(DIR .. "eqability.txt", table.concat(lines, "\n")) then error("could not write eqability.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.7 equipment-ability probe, part 2
+-- Which abilities does the game consider ACTIVE on this character (calcEquipmentAbilityFactor), what does the
+-- character's equipped-ability list for the chosen vocation contain, and what does the ability data table look like.
+local function dump_obj(L, obj, label, depth, maxn)
+  if type(obj) ~= "userdata" then L(label .. " = " .. tostring(obj)) return end
+  local td = try(function() return obj:get_type_definition() end)
+  L(label .. " : " .. (td and td:get_full_name() or "?"))
+  if depth <= 0 or not td then return end
+  local t, seen = td, {}
+  while t do
+    for _, f in ipairs(t:get_fields() or {}) do
+      if not f:is_static() then
+        local n = f:get_name()
+        if not seen[n] then
+          seen[n] = true
+          local v = try(function() return obj:get_field(n) end)
+          if type(v) == "userdata" then
+            local els = coll_elems(v)
+            if #els > 0 then
+              L(label .. "." .. n .. " = collection n=" .. #els)
+              for i = 1, math.min(#els, maxn) do
+                dump_obj(L, els[i], label .. "." .. n .. "[" .. i .. "]", depth - 1, maxn)
+              end
+            else
+              dump_obj(L, v, label .. "." .. n, depth - 1, maxn)
+            end
+          else
+            L(label .. "." .. n .. " = " .. tostring(v))
+          end
+        end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+end
+
+COMMANDS.eqability_probe2 = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local ids = enum_list("app.EquipmentAbilityID")
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local chara = follow(c.human, { "<Chara>k__BackingField" })
+  local cid
+  for _, o in ipairs({ c.src, chara }) do
+    for _, h in ipairs({ "get_CharaID", "get_CharaId", "getCharaID" }) do
+      if cid == nil and type(o) == "userdata" then cid = try(function() return o:call(h) end) end
+    end
+  end
+  L("character id = " .. tostring(cid) .. "   vocation = " .. job)
+  local itm = sdk.get_managed_singleton("app.ItemManager")
+  if cid ~= nil and itm then
+    L("== ACTIVE abilities (calcEquipmentAbilityFactor ~= 0) ==")
+    local n = 0
+    for _, e in ipairs(ids) do
+      local v = try(function() return itm:call("calcEquipmentAbilityFactor", cid, e.value) end)
+      if type(v) == "number" and v ~= 0 then
+        n = n + 1
+        L(string.format("ACTIVE  %s (id %s) factor %s", e.name, fmt_int(e.value), tostring(v)))
+      end
+    end
+    L("(" .. n .. " active)")
+  else
+    L("could not read the character id / ItemManager")
+  end
+  L("== AbilityContext.getEquipAbilityList(" .. job .. ") ==")
+  if c.ability then
+    local r = try(function() return c.ability:call("getEquipAbilityList", job) end)
+    if r ~= nil then dump_obj(L, r, "equipList", 3, 12) else L("returned nothing") end
+  end
+  L("== ALL EquipmentAbilityID values (id = name) ==")
+  for _, e in ipairs(ids) do L(string.format("%s = %s", fmt_int(e.value), e.name)) end
+  for _, l in ipairs(lines) do log.info(TAG .. "eqability2: " .. l) end
+  if not wr(DIR .. "eqability2.txt", table.concat(lines, "\n")) then error("could not write eqability2.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.1 item editor (equipment skills, appraisal, enhancement, stats)
+local IT = { owners = {}, rows = {}, owner_idx = 1 }
+
+local function im() return sdk.get_managed_singleton("app.ItemManager") end
+
+local function player_charid()
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  if not cm then return nil end
+  for _, g in ipairs({ "get_ManualPlayer", "getManualPlayer", "get_ManualPlayerNoCheck" }) do
+    local p = try(function() return cm:call(g) end)
+    if p then
+      for _, h in ipairs({ "get_CharaID", "get_CharaId", "getCharaID" }) do
+        local id = try(function() return p:call(h) end)
+        if type(id) == "number" then return id end
+      end
+    end
+  end
+  return nil
+end
+
+local function cur_key()
+  local o = IT.owners[IT.owner_idx]
+  return o and o.key
+end
+
+local function find_character(key)
+  local cands = {}
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  if cm then
+    local p = try(function() return cm:call("get_ManualPlayer") end)
+    if p then cands[#cands + 1] = p end
+  end
+  local pm = sdk.get_managed_singleton("app.PawnManager")
+  if pm then
+    local p = try(function() return pm:call("get_MainPawn") end)
+    if p then
+      local ch = try(function() return p:call("get_Chara") end) or try(function() return p:call("get_Character") end) or p
+      cands[#cands + 1] = ch
+    end
+  end
+  for _, ch in ipairs(cands) do
+    for _, h in ipairs({ "get_CharaID", "get_CharaId" }) do
+      local id = try(function() return ch:call(h) end)
+      if id == key then return ch end
+    end
+  end
+  return nil
+end
+
+local function slots_of(ab)
+  local t = {}
+  if ab then for i = 1, 4 do t[i] = tostring(try(function() return ab:get_field("Slot" .. i) end)) end end
+  return table.concat(t, ",")
+end
+
+local function get_ability(master) return try(function() return master:call("get_Ability") end) end
+
+local function describe(master)
+  local item = try(function() return master:call("get_ItemData") end)
+  local name = item and try(function() return item:call("get_Name") end) or "?"
+  local isequip = item and try(function() return item:call("get_IsEquip") end)
+  local equipped = try(function() return master:call("get_IsEquipped") end)
+  local ab = get_ability(master)
+  local slots = {}
+  for i = 1, 4 do slots[i] = ab and try(function() return ab:get_field("Slot" .. i) end) or 0 end
+  return { master = master, name = clean(name), isequip = isequip and true or false,
+           equipped = equipped and true or false, slots = slots }
+end
+
+local function row_of(i)
+  local r = IT.rows[int(i)]
+  if not r then error("item row not found - reload the item list") end
+  return r
+end
+
+local function write_ability(master, mutate)
+  local ab = get_ability(master)
+  if not ab then error("could not read ability") end
+  mutate(ab)
+  master:call("set_Ability", ab)
+  return slots_of(get_ability(master))
+end
+
+local function equipped_copy(master, key)
+  local m = im()
+  if not m then return nil end
+  local ro = try(function() return m:call("getEquipData", key) end)
+  if not ro then return nil end
+  local ed = try(function() return ro:get_field("Data") end)
+  if not ed then return nil end
+  local sid = try(function() return master:call("get_StorageId") end)
+  local equips = try(function() return ed:get_field("Equips") end)
+  if not equips then return nil end
+  for i, el in ipairs(elems_of(equips)) do
+    local es = try(function() return el:get_field("_StorageId") end)
+    if es ~= nil and es == sid then return ed, el, i - 1 end
+  end
+  return ed, nil, nil
+end
+
+local function full_apply(master)
+  local key = cur_key()
+  local m = im()
+  if not m then error("ItemManager not available") end
+  local report = {}
+  local ab = get_ability(master)
+  local param = try(function() return master:call("get_Param") end)
+  local ed, el = equipped_copy(master, key)
+  if el and ab then
+    pcall(function() el:set_field("_Ability", ab) end)
+    local back = try(function() return el:get_field("_Ability") end)
+    if slots_of(back) ~= slots_of(ab) then
+      pcall(function()
+        for s = 1, 4 do
+          back:set_field("Slot" .. s, try(function() return ab:get_field("Slot" .. s) end) or 0)
+        end
+      end)
+      back = try(function() return el:get_field("_Ability") end)
+    end
+    report[#report + 1] = "equipCopy=" .. (slots_of(back) == slots_of(ab) and "OK" or "MISMATCH")
+  else
+    report[#report + 1] = "equipCopy: none"
+  end
+  if param and ab then
+    report[#report + 1] = "updateEquipAbility:" .. tostring(pcall(function() m:call("updateEquipAbility", param, ab) end))
+    report[#report + 1] = "acquire:" .. tostring(pcall(function() m:call("acquireEquipmentAbility", ab) end))
+  end
+  if ed then report[#report + 1] = "calc:" .. tostring(pcall(function() ed:call("calc") end)) end
+  local ch = find_character(key)
+  if ch then
+    report[#report + 1] = "applyEquipData:" .. tostring(pcall(function() m:call("applyEquipDataForCharacter", ch) end))
+  else
+    report[#report + 1] = "character not found (only you / main pawn supported)"
+  end
+  return table.concat(report, " | ")
+end
+
+local function recalc(master)
+  local key = cur_key()
+  local m = im()
+  if not m then error("ItemManager not available") end
+  local rep = {}
+  local ed, el = equipped_copy(master, key)
+  local param = try(function() return master:call("get_Param") end)
+  if el then
+    local enh = try(function() return master:call("get_Enhance") end)
+    if enh then rep[#rep + 1] = "syncEnh:" .. tostring(pcall(function() el:set_field("_Enhance", enh) end)) end
+  end
+  if ed and param then rep[#rep + 1] = "updateEnhanceEquip:" .. tostring(pcall(function() ed:call("updateEnhanceEquip", param) end)) end
+  if ed then rep[#rep + 1] = "calc:" .. tostring(pcall(function() ed:call("calc") end)) end
+  local ch = find_character(key)
+  if ch then rep[#rep + 1] = "apply:" .. tostring(pcall(function() m:call("applyEquipDataForCharacter", ch) end)) end
+  return "recalc: " .. table.concat(rep, " | ")
+end
+
+-- owners: "idx,key,count,isplayer;..."
+COMMANDS.item_owners = function()
+  local m = im()
+  if not m then error("ItemManager not ready (load a save first)") end
+  local sd = try(function() return m:get_field("StorageDict") end)
+  local pid = player_charid()
+  local owners = {}
+  dict_iter(sd, function(k, list)
+    local items = try(function() return list:get_field("_items") end)
+    local size = try(function() return list:get_field("_size") end) or 0
+    if items then
+      local els = elems_of(items)
+      local ms = {}
+      for i = 1, math.min(size, #els) do ms[#ms + 1] = els[i] end
+      owners[#owners + 1] = { key = k, masters = ms, is_player = (pid ~= nil and k == pid) }
+    end
+  end)
+  table.sort(owners, function(x, y)
+    if x.is_player ~= y.is_player then return x.is_player and true or false end
+    return #x.masters > #y.masters
+  end)
+  IT.owners, IT.owner_idx, IT.rows = owners, 1, {}
+  local out = {}
+  for i, o in ipairs(owners) do
+    out[#out + 1] = string.format("%d,%s,%d,%d", i, clean(o.key), #o.masters, o.is_player and 1 or 0)
+  end
+  return table.concat(out, ";")
+end
+
+-- args: owner idx, only equipment(0/1), only equipped(0/1) -> writes itemrows.txt
+COMMANDS.item_rows = function(a)
+  local oi, only_equip, only_equipped = int(a[1]), a[2] == "1", a[3] == "1"
+  local o = IT.owners[oi]
+  if not o then error("owner not found - reload the inventory first") end
+  IT.owner_idx = oi
+  local rows = {}
+  for _, m in ipairs(o.masters) do
+    local d = describe(m)
+    if (not only_equip or d.isequip) and (not only_equipped or d.equipped) then rows[#rows + 1] = d end
+  end
+  table.sort(rows, function(x, y) return x.name < y.name end)
+  IT.rows = rows
+  local lines = {}
+  for i, d in ipairs(rows) do
+    lines[#lines + 1] = string.format("%d\t%s\t%d\t%s", i, d.name, d.equipped and 1 or 0,
+      table.concat({ fmt_int(d.slots[1]), fmt_int(d.slots[2]), fmt_int(d.slots[3]), fmt_int(d.slots[4]) }, ","))
+  end
+  if not wr(DIR .. "itemrows.txt", table.concat(lines, "\n")) then error("could not write itemrows.txt") end
+  return tostring(#rows)
+end
+
+-- "s1,s2,s3,s4,isAppraised,phys,magic,blow,weight,equipped"
+COMMANDS.item_get = function(a)
+  local r = row_of(a[1])
+  local ab = get_ability(r.master)
+  if not ab then error("could not read ability") end
+  local function f(n) return tostring(try(function() return ab:get_field(n) end) or 0) end
+  local appr = try(function() return ab:get_field("IsAppraised") end)
+  local equipped = try(function() return r.master:call("get_IsEquipped") end)
+  return table.concat({ f("Slot1"), f("Slot2"), f("Slot3"), f("Slot4"), appr and "1" or "0",
+    f("PhysicalParameter"), f("MagicParameter"), f("BlowParameter"), f("WeightParameter"),
+    equipped and "1" or "0" }, ",")
+end
+
+COMMANDS.item_set_slot = function(a)
+  local r = row_of(a[1])
+  local slot, id = int(a[2]), int(a[3])
+  if slot < 1 or slot > 4 then error("bad slot") end
+  local now = write_ability(r.master, function(ab) ab:set_field("Slot" .. slot, id) end)
+  return "slots now: " .. now
+end
+
+COMMANDS.item_clear = function(a)
+  local r = row_of(a[1])
+  local now = write_ability(r.master, function(ab) for s = 1, 4 do ab:set_field("Slot" .. s, 0) end end)
+  return "slots now: " .. now
+end
+
+COMMANDS.item_apply = function(a)
+  return full_apply(row_of(a[1]).master)
+end
+
+-- args: row, physical, magic, blow, weight, isAppraised(0/1)
+COMMANDS.item_set_appraisal = function(a)
+  local r = row_of(a[1])
+  local vals = { PhysicalParameter = int(a[2]), MagicParameter = int(a[3]), BlowParameter = int(a[4]), WeightParameter = int(a[5]) }
+  write_ability(r.master, function(ab)
+    for n, v in pairs(vals) do ab:set_field(n, v) end
+    ab:set_field("IsAppraised", a[6] == "1")
+  end)
+  return full_apply(r.master)
+end
+
+local function item_params(master)
+  local item = try(function() return master:call("get_ItemData") end)
+  if not item then error("item data not found") end
+  local wp = try(function() return item:call("get_WeaponParam") end)
+  local ap = try(function() return item:call("get_ArmorParam") end)
+  local p = wp or ap
+  if not p then error("this item has no weapon/armor stats") end
+  return item, p, wp ~= nil
+end
+
+local enh_cap_cache = {}
+local function enhance_cap(is_weapon)
+  local k = is_weapon and "w" or "a"
+  if enh_cap_cache[k] then return enh_cap_cache[k] end
+  local cap = 0
+  local m = im()
+  local d = m and try(function() return m:get_field(is_weapon and "_WeaponEnhanceDict" or "_ArmorEnhanceDict") end)
+  dict_iter(d, function(_, arr)
+    local n = #elems_of(arr)
+    if n > cap then cap = n end
+  end)
+  if cap == 0 then cap = 10 end
+  enh_cap_cache[k] = cap
+  return cap
+end
+
+-- "level,cap,type0,type1,type2,isWeapon"
+COMMANDS.item_get_enh = function(a)
+  local r = row_of(a[1])
+  local _, _, is_weapon = item_params(r.master)
+  local enh = try(function() return r.master:call("get_Enhance") end)
+  if not enh then error("no enhance data") end
+  local function f(n) return tostring(try(function() return enh:get_field(n) end) or 0) end
+  return table.concat({ f("_Num"), tostring(enhance_cap(is_weapon)), f("_Type0"), f("_Type1"), f("_Type2"),
+    is_weapon and "1" or "0" }, ",")
+end
+
+-- args: row, level, type0, type1, type2
+COMMANDS.item_set_enh = function(a)
+  local r = row_of(a[1])
+  local enh = try(function() return r.master:call("get_Enhance") end)
+  if not enh then error("no enhance data") end
+  enh:set_field("_Num", int(a[2]))
+  for t = 0, 2 do enh:set_field("_Type" .. t, int(a[3 + t])) end
+  r.master:call("set_Enhance", enh)
+  return recalc(r.master)
+end
+
+local W_FIELDS = {
+  { "_PhysicalAttack", "Physical Attack" }, { "_MagicAttack", "Magic Attack" },
+  { "_SlashRate", "Slash Rate" }, { "_StrikeRate", "Strike Rate" }, { "_StrikeStore", "Strike Store" },
+  { "_Blow", "Blow" }, { "_Shake", "Shake" }, { "_ElementStore", "Element Store" },
+  { "_StaminaReduce", "Stamina Reduce" }, { "_ShakeGuard", "Shake Guard" }, { "_BlowGuard", "Blow Guard" },
+  { "_PoisonStore", "Poison Store" }, { "_SleepStore", "Sleep Store" }, { "_SilentStore", "Silence Store" },
+  { "_StoneStore", "Stone Store" }, { "_WaterStore", "Water Store" }, { "_OilStore", "Oil Store" },
+}
+local A_FIELDS = {
+  { "_PhysicalDefence", "Defense" }, { "_MagicDefence", "Magick Defense" },
+  { "_SlashDefenceRate", "Slash Res" }, { "_StrikeDefenceRate", "Strike Res" },
+  { "_ShakeResistRate", "Shake (Knockdown) Res" }, { "_BlowResistRate", "Blow Res" },
+  { "_FireDefence", "Fire Defense" }, { "_FireResist", "Fire Resist" },
+  { "_IceDefence", "Ice Defense" }, { "_IceResist", "Ice Resist" },
+  { "_ThunderDefence", "Thunder Defense" }, { "_ThunderResist", "Thunder Resist" },
+  { "_LightDefence", "Light Defense" }, { "_DarkDefence", "Dark Defense" },
+  { "_PoisonResist", "Poison Resist" }, { "_SleepResist", "Sleep Resist" }, { "_SilentResist", "Silence Resist" },
+  { "_StoneResist", "Stone Resist" }, { "_WaterResist", "Water Resist" }, { "_OilResist", "Oil Resist" },
+  { "_FaintResist", "Faint Resist" }, { "_ColdResist", "Cold Resist" },
+}
+local TOTAL_FIELDS = {
+  { "_PhysicalAttack", "Attack" }, { "_MagicAttack", "Magick Attack" }, { "_Shake", "Shake" }, { "_Blow", "Blow" },
+  { "_PhysicalDefence", "Defense" }, { "_MagicDefence", "Magick Defense" },
+  { "_ShakeResistRate", "Knockdown Res" }, { "_ColdResist", "Cold Resist" }, { "_Weight", "Weight (raw)" },
+}
+
+-- writes itemstats.txt ("field\tlabel\tvalue"); returns "W,n" or "A,n"
+COMMANDS.item_get_stats = function(a)
+  local r = row_of(a[1])
+  local item, p, is_weapon = item_params(r.master)
+  local lines = {}
+  for _, f in ipairs(is_weapon and W_FIELDS or A_FIELDS) do
+    local v = try(function() return p:get_field(f[1]) end)
+    if type(v) == "number" then lines[#lines + 1] = f[1] .. "\t" .. f[2] .. "\t" .. tostring(v) end
+  end
+  local w = try(function() return item:get_field("_Weight") end)
+  if type(w) == "number" then lines[#lines + 1] = "_Weight\tWeight (raw)\t" .. tostring(w) end
+  if not wr(DIR .. "itemstats.txt", table.concat(lines, "\n")) then error("could not write itemstats.txt") end
+  return (is_weapon and "W," or "A,") .. #lines
+end
+
+-- args: row, field, value  (edits the SHARED item data in memory; resets when the game restarts)
+COMMANDS.item_set_stat = function(a)
+  local r = row_of(a[1])
+  local item, p, is_weapon = item_params(r.master)
+  local field, v = a[2], int(a[3])
+  local allowed = (field == "_Weight")
+  for _, f in ipairs(is_weapon and W_FIELDS or A_FIELDS) do if f[1] == field then allowed = true end end
+  if not allowed then error("field not allowed: " .. tostring(field)) end
+  if field == "_Weight" then item:set_field(field, v) else p:set_field(field, v) end
+  return recalc(r.master)
+end
+
+---------------------------------------------------------------- v1.11 helpers (moved up: used by the v1.16 item stat dump)
+local function tdn(t) return try(function() return t:get_full_name() end) end
+
+local function msig(m)
+  local ps = {}
+  for _, p in ipairs(m:get_param_types() or {}) do ps[#ps + 1] = tdn(p) or "?" end
+  local rt = try(function() return m:get_return_type():get_full_name() end) or "?"
+  return m:get_name() .. "(" .. table.concat(ps, ", ") .. ") -> " .. rt
+end
+
+local function flat_fields(L, obj, label)
+  if type(obj) ~= "userdata" then L(label .. " = " .. tostring(obj)) return end
+  local td = try(function() return obj:get_type_definition() end)
+  L(label .. " : " .. (td and tdn(td) or "?"))
+  local seen = {}
+  while td do
+    for _, f in ipairs(td:get_fields() or {}) do
+      if not f:is_static() then
+        local n = f:get_name()
+        if not seen[n] then
+          seen[n] = true
+          local v = try(function() return obj:get_field(n) end)
+          if type(v) == "userdata" then
+            local ft = try(function() return f:get_type():get_full_name() end) or "?"
+            L("   " .. n .. " : " .. ft)
+          else
+            L("   " .. n .. " = " .. tostring(v))
+          end
+        end
+      end
+    end
+    td = try(function() return td:get_parent_type() end)
+  end
+end
+
+COMMANDS.item_recalc = function(a)
+  return recalc(row_of(a[1]).master)
+end
+
+---------------------------------------------------------------- v1.16: dump EVERY field of one item (hunt hidden stats
+-- like cast speed / stamina regen on rings). args: row -> writes itemstatdump.txt
+COMMANDS.item_stat_dump = function(a)
+  local r = row_of(a[1])
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  L("##### item stat dump : " .. tostring(r.name) .. " #####")
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("item data not found") end
+  L("")
+  flat_fields(L, r.master, "InventoryEntry(master)")
+  L("")
+  flat_fields(L, item, "ItemData")
+  L("")
+  local wp = try(function() return item:call("get_WeaponParam") end)
+  local ap = try(function() return item:call("get_ArmorParam") end)
+  if wp then flat_fields(L, wp, "WeaponParam") else L("WeaponParam = (none)") end
+  L("")
+  if ap then flat_fields(L, ap, "ArmorParam") else L("ArmorParam = (none)") end
+  L("")
+  local ab = get_ability(r.master)
+  if ab then flat_fields(L, ab, "Ability") else L("Ability = (none)") end
+  L("")
+  L("##### fields whose names suggest cast / speed / stamina / regen / charge / cost #####")
+  local PATS = { "cast", "charg", "speed", "stamina", "regen", "recover", "cost",
+                 "consum", "chant", "rapid", "quick", "haste", "cool", "gauge" }
+  local seen_hit = {}
+  local function sweep(obj, label)
+    if type(obj) ~= "userdata" then return end
+    local td = try(function() return obj:get_type_definition() end)
+    while td do
+      for _, f in ipairs(td:get_fields() or {}) do
+        if not f:is_static() then
+          local n = f:get_name()
+          local l = n:lower()
+          for _, p in ipairs(PATS) do
+            if l:find(p, 1, true) and not seen_hit[label .. n] then
+              seen_hit[label .. n] = true
+              local v = try(function() return obj:get_field(n) end)
+              L(string.format("HIT  %s.%s = %s", label, n,
+                              type(v) == "userdata" and "<object>" or tostring(v)))
+              break
+            end
+          end
+        end
+      end
+      td = try(function() return td:get_parent_type() end)
+    end
+  end
+  sweep(item, "ItemData")
+  sweep(wp, "WeaponParam")
+  sweep(ap, "ArmorParam")
+  sweep(r.master, "Entry")
+  sweep(ab, "Ability")
+  for _, l in ipairs(lines) do log.info(TAG .. "statdump: " .. l) end
+  if not wr(DIR .. "itemstatdump.txt", table.concat(lines, "\n")) then
+    error("could not write itemstatdump.txt")
+  end
+  return tostring(#lines) .. " lines"
+end
+
+---------------------------------------------------------------- v1.17: read/write the _Special effect fields of an item
+-- (rings etc. carry their unique effects here, e.g. cast speed / stamina regen
+--  as effect ID + parameters). args: row -> "special,v1,v2,v3"
+COMMANDS.item_get_special = function(a)
+  local r = row_of(a[1])
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("item data not found") end
+  local function f(n) return tostring(try(function() return item:get_field(n) end) or 0) end
+  return table.concat({ f("_Special"), f("_SpecialValue"), f("_SpecialValue2"), f("_SpecialValue3") }, ",")
+end
+
+-- args: row, special, v1, v2, v3  (writes the SHARED item data; resets on restart)
+COMMANDS.item_set_special = function(a)
+  local r = row_of(a[1])
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("item data not found") end
+  local fields = { "_Special", "_SpecialValue", "_SpecialValue2", "_SpecialValue3" }
+  for i = 1, 4 do
+    local ok = try(function() item:set_field(fields[i], int(a[1 + i])) return true end)
+    if not ok then error("could not write " .. fields[i] .. " (not present on this item type?)") end
+  end
+  return recalc(r.master)
+end
+
+---------------------------------------------------------------- v1.18: probe for the special-effect NAME lookup
+-- Lists every method/field of the item data (and its Ability), calls all
+-- no-arg getters, highlights anything with "special" in the name.
+-- args: row -> writes specialprobe.txt
+COMMANDS.item_special_probe = function(a)
+  local r = row_of(a[1])
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  L("##### special probe : " .. tostring(r.name) .. " #####")
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("item data not found") end
+  local function probe_obj(obj, tag)
+    local tdef = try(function() return obj:get_type_definition() end)
+    if not tdef then L(tag .. ": no type definition") return end
+    L("")
+    L("## " .. tag .. " : " .. tostring(try(function() return tdef:get_full_name() end) or "?") .. " ##")
+    local methods = try(function() return tdef:get_methods() end) or {}
+    L("-- methods (" .. #methods .. ") --")
+    local getters = {}
+    for _, m in ipairs(methods) do
+      local mn = try(function() return m:get_name() end) or "?"
+      local pt = try(function() return m:get_param_types() end) or {}
+      local mark = ""
+      if mn:lower():find("special") then mark = "   <== SPECIAL?" end
+      L("  " .. mn .. " (params=" .. #pt .. ")" .. mark)
+      if #pt == 0 and mn:sub(1, 3) == "get" then getters[#getters + 1] = mn end
+    end
+    L("-- getter results --")
+    for _, mn in ipairs(getters) do
+      local v = try(function() return obj:call(mn) end)
+      local disp
+      if v == nil then disp = "(nil/error)"
+      else
+        local ok, st = pcall(tostring, v)
+        disp = ok and tostring(st):sub(1, 400) or "(unprintable)"
+      end
+      L("  " .. mn .. " -> " .. disp)
+    end
+    local fields = try(function() return tdef:get_fields() end) or {}
+    L("-- fields (" .. #fields .. ") --")
+    for _, f in ipairs(fields) do
+      local fn = try(function() return f:get_name() end) or "?"
+      local mark = ""
+      if fn:lower():find("special") then mark = "   <== SPECIAL?" end
+      L("  " .. fn .. mark)
+    end
+  end
+  probe_obj(item, "ItemData")
+  local ab = try(function() return item:call("get_Ability") end)
+  if ab then probe_obj(ab, "Ability") else L("Ability: (none)") end
+  -- v1.22.0: hunt the effect NAME. The item data has no text getters, so try the
+  -- inventory entry (master) for explanation/description, and guess type names.
+  local mtd = try(function() return r.master:get_type_definition() end)
+  if mtd then
+    L("")
+    L("## master : " .. tostring(try(function() return mtd:get_full_name() end) or "?") .. " ##")
+    local mmethods = try(function() return mtd:get_methods() end) or {}
+    for _, m in ipairs(mmethods) do
+      local mn = try(function() return m:get_name() end) or "?"
+      local pt = try(function() return m:get_param_types() end) or {}
+      if #pt == 0 then
+        local low = mn:lower()
+        if low:find("explain") or low:find("expos") or low:find("detail") or low:find("flavor") then
+          local v = try(function() return r.master:call(mn) end)
+          local disp = "(nil/error)"
+          if v ~= nil then
+            local ok, st = pcall(tostring, v)
+            disp = ok and tostring(st):sub(1, 600) or "(unprintable)"
+          end
+          L("  " .. mn .. " -> " .. disp)
+        end
+      end
+    end
+  end
+  L("")
+  L("## candidate special type definitions ##")
+  local candidates = {
+    "app.ItemDefine.SpecialType", "app.ItemDefine.SpecialKind",
+    "app.EquipSpecialParam", "app.ItemSpecialParam",
+    "app.ItemDefine.EquipSpecialType", "app.ArmorSpecialParam",
+  }
+  for _, cn in ipairs(candidates) do
+    local ctd = try(function() return sdk.find_type_definition(cn) end)
+    if ctd then
+      L("  " .. cn .. "  EXISTS")
+      for _, f in ipairs(try(function() return ctd:get_fields() end) or {}) do
+        L("    field: " .. tostring(try(function() return f:get_name() end) or "?"))
+      end
+    else
+      L("  " .. cn .. "  (not found)")
+    end
+  end
+  if not wr(DIR .. "specialprobe.txt", table.concat(lines, "\n")) then
+    error("could not write specialprobe.txt")
+  end
+  return tostring(#lines) .. " lines"
+end
+
+---------------------------------------------------------------- v1.19: sweep every loaded row for _Special ~= 0
+-- args: none (uses IT.rows; load the inventory in the Item Editor tab first)
+-- writes specialsweep.txt : "name | special=ID v1=A v2=B v3=C"
+COMMANDS.item_special_sweep = function(a)
+  if #IT.rows == 0 then error("inventory not loaded - open the Item Editor tab and load it first") end
+  local lines = {}
+  lines[#lines + 1] = "##### special sweep : items with _Special ~= 0 #####"
+  for _, r in ipairs(IT.rows) do
+    local item = try(function() return r.master:call("get_ItemData") end)
+    if item then
+      local sp = try(function() return item:get_field("_Special") end) or 0
+      if sp ~= 0 then
+        local v1 = try(function() return item:get_field("_SpecialValue") end) or 0
+        local v2 = try(function() return item:get_field("_SpecialValue2") end) or 0
+        local v3 = try(function() return item:get_field("_SpecialValue3") end) or 0
+        lines[#lines + 1] = tostring(r.name) .. " | special=" .. tostring(sp)
+          .. " v1=" .. tostring(v1) .. " v2=" .. tostring(v2) .. " v3=" .. tostring(v3)
+      end
+    end
+  end
+  if not wr(DIR .. "specialsweep.txt", table.concat(lines, string.char(10))) then
+    error("could not write specialsweep.txt")
+  end
+  return tostring(#lines - 1) .. " items"
+end
+
+---------------------------------------------------------------- v1.22: set vocation anywhere (player or pawn)
+-- Adapted from SetVocationAnywhere (Dutchysaur): request the job change anywhere,
+-- unlock the job if needed, best-effort unequip of vocation-locked armor.
+-- args: kind ("player"/"pawn"), jobnum (1-10)
+COMMANDS.set_vocation = function(a)
+  local kind = a[1]
+  local jobnum = int(a[2])
+  if jobnum < 1 or jobnum > 10 then error("bad job number (1-10)") end
+  if kind == "pawn" and jobnum > 6 then error("pawns can only use vocations 1-6") end
+  local t = get_target(kind)
+  local human = t.human
+  local jc = t.job
+  if jc then
+    local q = try(function() return jc:call("isJobQualified", jobnum) end)
+    if not q then try(function() jc:call("setJobQualified", jobnum) end) end
+  end
+  local changer = try(function() return human:call("get_JobChanger") end)
+  if not changer then error("JobChanger not found") end
+  local ok = try(function() changer:call("requestChangeJob", jobnum) return true end)
+  if not ok then error("requestChangeJob failed") end
+  try(function()
+    local mgr = im()
+    local charaid = t.src:call("get_CharaID")
+    local storage = mgr:call("getStorageList", charaid, nil)
+    local n = storage:call("get_Count")
+    for i = 0, n - 1 do
+      local sd = storage:call("get_Item", i)
+      local master = mgr:call("getStorageMasterData(app.ItemDefine.StorageData)", sd)
+      if master:call("get_IsEquipped") == true then
+        local itemid = sd:get_field("_ItemId")
+        local param = mgr:call("getItemData(System.Int32)", itemid)
+        if param:get_field("_Category") == 3 then
+          mgr:call("removeEquip(app.ItemDefine.StorageData, app.Character, System.Boolean, System.Boolean)",
+            master:call("get_Param"), t.src, false, true)
+        end
+      end
+    end
+    mgr:call("applyEquipChange")
+  end)
+  return "vocation set to " .. jobnum
+end
+
+-- args: kind ("player"/"pawn")
+COMMANDS.unlock_all_vocations = function(a)
+  local t = get_target(a[1])
+  local jc = t.job
+  if not jc then error("JobContext not found") end
+  local maxjob = a[1] == "pawn" and 6 or 10
+  local n = 0
+  for i = 1, maxjob do
+    local q = try(function() return jc:call("isJobQualified", i) end)
+    if not q then
+      if try(function() jc:call("setJobQualified", i) return true end) then n = n + 1 end
+    end
+  end
+  return "unlocked " .. n .. " vocation(s)"
+end
+
+-- "Attack 123 | Defense 45 ..." as the game computes it for the equipped item's owner
+COMMANDS.item_totals = function(a)
+  local r = row_of(a[1])
+  local ed = equipped_copy(r.master, cur_key())
+  local eq = ed and try(function() return ed:get_field("_EqParam") end)
+  if not eq then return "(not equipped / no totals)" end
+  local parts = {}
+  for _, f in ipairs(TOTAL_FIELDS) do
+    parts[#parts + 1] = f[2] .. " " .. tostring(try(function() return eq:get_field(f[1]) end))
+  end
+  return table.concat(parts, "  |  ")
+end
+
+---------------------------------------------------------------- v1.2 duplicate items
+-- Duplicates an item you own by asking the game to give you the same item ID again (the game's own
+-- getItem / forceGetItemToWarehouse). For equipment it can also copy skills / appraisal / enhancement
+-- onto the new copies (best effort). Has its own state, so it does not disturb the Item Editor tab.
+local DUP = { owners = {}, rows = {} }
+
+local function dup_read_owners()
+  local m = im()
+  if not m then error("ItemManager not ready (load a save first)") end
+  local sd = try(function() return m:get_field("StorageDict") end)
+  local pid = player_charid()
+  local owners = {}
+  dict_iter(sd, function(k, list)
+    local items = try(function() return list:get_field("_items") end)
+    local size = try(function() return list:get_field("_size") end) or 0
+    if items then
+      local els = elems_of(items)
+      local ms = {}
+      for i = 1, math.min(size, #els) do
+        if els[i] ~= nil then ms[#ms + 1] = els[i] end
+      end
+      owners[#owners + 1] = { key = k, masters = ms, is_player = (pid ~= nil and k == pid) }
+    end
+  end)
+  table.sort(owners, function(x, y)
+    if x.is_player ~= y.is_player then return x.is_player and true or false end
+    return #x.masters > #y.masters
+  end)
+  return owners
+end
+
+-- address of the shared item-data object -> item id (taken from the game's own item table)
+local function dup_idmap()
+  local map = {}
+  local m = im()
+  local dict = m and try(function() return m:get_field("_ItemDataDict") end)
+  dict_iter(dict, function(k, v)
+    if type(k) == "number" and type(v) == "userdata" then
+      local ad = try(function() return v:get_address() end)
+      if ad then map[ad] = k end
+    end
+  end)
+  return map
+end
+
+local function dup_item_id(master, map)
+  local item = try(function() return master:call("get_ItemData") end)
+  if type(item) == "userdata" then
+    local ad = try(function() return item:get_address() end)
+    if ad and map[ad] then return map[ad], item end
+  end
+  for _, n in ipairs({ "get_ItemId", "get_ItemID", "get_Id", "get_ID" }) do
+    local v = try(function() return master:call(n) end)
+    if type(v) == "number" then return v, item end
+    if type(item) == "userdata" then
+      v = try(function() return item:call(n) end)
+      if type(v) == "number" then return v, item end
+    end
+  end
+  if type(item) == "userdata" then
+    for _, n in ipairs({ "_ItemId", "_ItemID", "_Id", "ItemId", "_ID" }) do
+      local v = try(function() return item:get_field(n) end)
+      if type(v) == "number" then return v, item end
+    end
+  end
+  return nil, item
+end
+
+local function dup_count(master, id)
+  for _, n in ipairs({ "get_Num", "get_Count", "get_StackNum", "get_HaveNum", "get_ItemNum" }) do
+    local v = try(function() return master:call(n) end)
+    if type(v) == "number" then return v end
+  end
+  for _, n in ipairs({ "_Num", "_Count", "Num", "Count", "_StackNum" }) do
+    local v = try(function() return master:get_field(n) end)
+    if type(v) == "number" then return v end
+  end
+  local m = im()
+  if m and id then
+    for _, n in ipairs({ "getHaveNum", "getItemNum", "getNum", "getHaveItemNum" }) do
+      local v = try(function() return m:call(n, id) end)
+      if type(v) == "number" then return v end
+    end
+  end
+  return nil
+end
+
+local function dup_sid(master)
+  local s = try(function() return master:call("get_StorageId") end)
+  if s == nil then return nil end
+  return tostring(s)
+end
+
+-- same format as item_owners: "idx,key,count,isplayer;..."
+COMMANDS.dup_owners = function()
+  DUP.owners, DUP.rows = dup_read_owners(), {}
+  local out = {}
+  for i, o in ipairs(DUP.owners) do
+    out[#out + 1] = string.format("%d,%s,%d,%d", i, clean(o.key), #o.masters, o.is_player and 1 or 0)
+  end
+  return table.concat(out, ";")
+end
+
+-- args: owner idx, only equipment(0/1) -> writes duprows.txt "row\tname\tid\tcount\tisequip\tequipped"
+COMMANDS.dup_rows = function(a)
+  local o = DUP.owners[int(a[1])]
+  if not o then error("owner not found - reload the inventory first") end
+  local only_equip = a[2] == "1"
+  local map = dup_idmap()
+  local rows = {}
+  for _, m in ipairs(o.masters) do
+    local id, item = dup_item_id(m, map)
+    local isequip = item and try(function() return item:call("get_IsEquip") end) and true or false
+    if not only_equip or isequip then
+      local name = item and try(function() return item:call("get_Name") end) or "?"
+      rows[#rows + 1] = {
+        master = m, id = id, isequip = isequip, name = clean(name),
+        count = id and dup_count(m, id) or nil,
+        equipped = try(function() return m:call("get_IsEquipped") end) and true or false,
+      }
+    end
+  end
+  table.sort(rows, function(x, y) return x.name < y.name end)
+  DUP.rows = rows
+  local lines = {}
+  for i, r in ipairs(rows) do
+    lines[#lines + 1] = string.format("%d\t%s\t%s\t%s\t%d\t%d", i, r.name, r.id and fmt_int(r.id) or "-1",
+      r.count and fmt_int(r.count) or "?", r.isequip and 1 or 0, r.equipped and 1 or 0)
+  end
+  if not wr(DIR .. "duprows.txt", table.concat(lines, "\n")) then error("could not write duprows.txt") end
+  return tostring(#rows)
+end
+
+-- args: row, copies (0 = same amount as you own now), to_storage(0/1), copy_props(0/1)
+COMMANDS.dup_do = function(a)
+  local r = DUP.rows[int(a[1])]
+  if not r then error("item row not found - reload the list") end
+  local copies, to_storage, props = int(a[2]), a[3] == "1", a[4] == "1"
+  if not r.id then error("could not determine this item's ID - press Probe and send me the log") end
+  if copies == 0 then
+    if not r.count then error("stack size unreadable for this item - type a number of copies instead") end
+    copies = math.floor(r.count)
+  end
+  if copies < 1 or copies > 9999 then error("copies must be between 1 and 9999") end
+  if r.isequip and copies > 50 then error("equipment: at most 50 copies at once") end
+
+  local track = r.isequip and props
+  local before, nbefore = {}, 0
+  if track then
+    for _, o in ipairs(dup_read_owners()) do
+      for _, mm in ipairs(o.masters) do
+        local sid = dup_sid(mm)
+        if sid then before[sid] = true nbefore = nbefore + 1 end
+      end
+    end
+  end
+
+  local what = give_item(r.id, copies, to_storage)
+  local msg = string.format("%s: %d x %s (id %s)", what, copies, r.name, fmt_int(r.id))
+  if not track then return msg end
+  if nbefore == 0 then return msg .. " - could not track the new copies, properties not copied" end
+
+  local src_ab = try(function() return r.master:call("get_Ability") end)
+  local src_enh = try(function() return r.master:call("get_Enhance") end)
+  local map = dup_idmap()
+  local n_new, n_ok = 0, 0
+  for _, o in ipairs(dup_read_owners()) do
+    for _, mm in ipairs(o.masters) do
+      local sid = dup_sid(mm)
+      if sid and not before[sid] then
+        local id2 = dup_item_id(mm, map)
+        if id2 == r.id then
+          n_new = n_new + 1
+          local ok1 = src_ab ~= nil and pcall(function() mm:call("set_Ability", src_ab) end)
+          local ok2 = src_enh ~= nil and pcall(function() mm:call("set_Enhance", src_enh) end)
+          if ok1 or ok2 then n_ok = n_ok + 1 end
+        end
+      end
+    end
+  end
+  return string.format("%s | new copies found: %d, skills/enhancement copied to: %d", msg, n_new, n_ok)
+end
+
+-- logs the fields / methods of the selected inventory entry (to find stack-size / id accessors)
+COMMANDS.dup_probe = function(a)
+  local r = DUP.rows[int(a[1])]
+  if not r then error("item row not found - reload the list") end
+  local found = {}
+  local function scan(obj, label)
+    if type(obj) ~= "userdata" then return end
+    local td = try(function() return obj:get_type_definition() end)
+    while td do
+      log.info(TAG .. "probe " .. label .. " type " .. tostring(td:get_full_name()))
+      for _, f in ipairs(td:get_fields() or {}) do
+        local n = f:get_name()
+        local ln = n:lower()
+        if ln:find("num", 1, true) or ln:find("count", 1, true) or ln:find("stack", 1, true) or ln:find("id", 1, true) then
+          local v = try(function() return obj:get_field(n) end)
+          log.info(TAG .. "probe " .. label .. " field " .. n .. " = " .. tostring(v))
+          found[#found + 1] = label .. "." .. n
+        end
+      end
+      for _, m in ipairs(td:get_methods() or {}) do
+        local n = m:get_name()
+        local ln = n:lower()
+        if #(m:get_param_types() or {}) == 0 and n:sub(1, 4) == "get_"
+            and (ln:find("num", 1, true) or ln:find("count", 1, true) or ln:find("stack", 1, true) or ln:find("id", 1, true)) then
+          local v = try(function() return obj:call(n) end)
+          log.info(TAG .. "probe " .. label .. " method " .. n .. " = " .. tostring(v))
+          found[#found + 1] = label .. "." .. n
+        end
+      end
+      td = try(function() return td:get_parent_type() end)
+    end
+  end
+  scan(r.master, "master")
+  scan(try(function() return r.master:call("get_ItemData") end), "itemdata")
+  return string.format("id=%s count=%s - %d candidate members written to the REFramework log",
+    tostring(r.id), tostring(r.count), #found)
+end
+
+---------------------------------------------------------------- v1.9 upgraded weapon skills (JobNN_ExSkillK) on the equipped weapon
+-- The upgraded weapon skills (Shearing Wind, Fanged Rupture, ...) are the equipment abilities JobNN_ExSkill1..5 that sit in an
+-- item's 4 special-skill slots. This writes the chosen ones into the slots of the target's EQUIPPED weapon(s) and re-applies.
+local EXS_UNDO = {}
+
+local function exs_target_owner(c)
+  local chara = follow(c.human, { "<Chara>k__BackingField" })
+  local cid
+  for _, o in ipairs({ c.src, chara }) do
+    for _, h in ipairs({ "get_CharaID", "get_CharaId", "getCharaID" }) do
+      if cid == nil and type(o) == "userdata" then cid = try(function() return o:call(h) end) end
+    end
+  end
+  if cid == nil then error("character id not found") end
+  COMMANDS.item_owners()
+  for i, o in ipairs(IT.owners) do
+    if tostring(o.key) == tostring(cid) then IT.owner_idx = i return IT.owners[i] end
+  end
+  error("inventory of this character not found")
+end
+
+local function exs_equipped_weapons(owner)
+  local out = {}
+  for _, m in ipairs(owner.masters) do
+    local d = describe(m)
+    if d.isequip and d.equipped then
+      local item = try(function() return m:call("get_ItemData") end)
+      local wp = item and try(function() return item:call("get_WeaponParam") end)
+      if wp then out[#out + 1] = { master = m, name = d.name } end
+    end
+  end
+  return out
+end
+
+-- args: target, job (1-9), "k,k,..." (which ExSkill numbers 1-5, max 4)
+COMMANDS.exskill_equip = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local picks = {}
+  for k in tostring(a[3] or ""):gmatch("%d+") do picks[#picks + 1] = tonumber(k) end
+  if #picks == 0 then error("pick at least one ExSkill") end
+  if #picks > 4 then error("an item has only 4 skill slots - pick at most 4") end
+  local byname = {}
+  for _, e in ipairs(enum_list("app.EquipmentAbilityID")) do byname[e.name] = e.value end
+  local ids = {}
+  for _, k in ipairs(picks) do
+    local v = byname[string.format("Job%02d_ExSkill%d", job, k)]
+    if not v then error(string.format("no ability Job%02d_ExSkill%d in this game version", job, k)) end
+    ids[#ids + 1] = v
+  end
+  local owner = exs_target_owner(c)
+  local weapons = exs_equipped_weapons(owner)
+  if #weapons == 0 then error("no equipped weapon found for this character") end
+  EXS_UNDO = {}
+  local report = {}
+  for _, w in ipairs(weapons) do
+    local ab = get_ability(w.master)
+    local old = {}
+    for i = 1, 4 do old[i] = ab and try(function() return ab:get_field("Slot" .. i) end) or 0 end
+    EXS_UNDO[#EXS_UNDO + 1] = { master = w.master, slots = old, name = w.name }
+    write_ability(w.master, function(x) for i, id in ipairs(ids) do x:set_field("Slot" .. i, id) end end)
+    report[#report + 1] = w.name .. ": " .. full_apply(w.master)
+  end
+  return string.format("%d weapon(s): slots 1-%d = ExSkill %s | %s", #weapons, #ids, table.concat(picks, ","), table.concat(report, " || "))
+end
+
+COMMANDS.exskill_undo = function(a)
+  if #EXS_UNDO == 0 then error("nothing to undo") end
+  local c = get_target(a[1])
+  exs_target_owner(c)   -- refreshes IT.owners / owner_idx so full_apply knows the owner
+  local report = {}
+  for _, u in ipairs(EXS_UNDO) do
+    write_ability(u.master, function(x) for i = 1, 4 do x:set_field("Slot" .. i, u.slots[i] or 0) end end)
+    report[#report + 1] = u.name .. ": " .. full_apply(u.master)
+  end
+  EXS_UNDO = {}
+  return "restored | " .. table.concat(report, " || ")
+end
+
+---------------------------------------------------------------- v1.10 item type -> skills that really occur on that type
+-- The game does not let every special skill sit on every item type. We learn the rule from the game's own items:
+-- every item in every inventory / storage is read, its type ("class") is found, and the skills seen in its 4 slots are recorded.
+local EQMAP = nil
+local EQ_VIA = "?"
+
+local function item_slot(master)
+  local item = try(function() return master:call("get_ItemData") end)
+  local srcs = { master, item }
+  if type(item) == "userdata" then
+    srcs[#srcs + 1] = try(function() return item:call("get_WeaponParam") end)
+    srcs[#srcs + 1] = try(function() return item:call("get_ArmorParam") end)
+  end
+  for oi, o in ipairs(srcs) do
+    if type(o) == "userdata" then
+      local td = try(function() return o:get_type_definition() end)
+      while td do
+        for _, m in ipairs(td:get_methods() or {}) do
+          local n = m:get_name()
+          if n:sub(1, 4) == "get_" and #(m:get_param_types() or {}) == 0 then
+            local rt = try(function() return m:get_return_type():get_full_name() end) or ""
+            if rt:find("SlotEnum", 1, true) or rt:find("EquipSlot", 1, true) then
+              local v = try(function() return o:call(n) end)
+              if type(v) == "number" then
+                EQ_VIA = "source#" .. oi .. " " .. tostring(td:get_full_name()) .. "." .. n .. " -> " .. rt
+                return v
+              end
+            end
+          end
+        end
+        td = try(function() return td:get_parent_type() end)
+      end
+    end
+  end
+  return nil
+end
+
+local EQ_CATNAMES = nil
+local function item_class(master)
+  local item = try(function() return master:call("get_ItemData") end)
+  local wp = item and try(function() return item:call("get_WeaponParam") end)
+  local ap = item and try(function() return item:call("get_ArmorParam") end)
+  local cat = item and try(function() return item:get_field("_EquipCategory") end)
+  local job = item and try(function() return item:get_field("_Job") end)
+  if wp then
+    local n
+    if type(job) == "number" then
+      for j = 0, 12 do if math.floor(job) == (1 << j) then n = j end end
+    end
+    if n then return "Weapon:job" .. n, "Weapon", n, string.format("Weapon (Job%02d)", n) end
+    return "Weapon:mask" .. tostring(job), "Weapon", nil, "Weapon (job mask " .. tostring(job) .. ")"
+  end
+  if ap then
+    if not EQ_CATNAMES then
+      EQ_CATNAMES = {}
+      for _, e in ipairs(enum_list("app.ItemEquipCategory")) do EQ_CATNAMES[e.value] = e.name end
+    end
+    return "Armor:cat" .. tostring(cat), "Armor", cat, "Armor / " .. (EQ_CATNAMES[cat] or tostring(cat))
+  end
+  return "Other:-", "Other", nil, "Other"
+end
+
+local function eq_labels()
+  local t = {}
+  for _, e in ipairs(enum_list("app.EquipData.SlotEnum")) do t[e.value] = e.name end
+  return t
+end
+
+local function eqmap_build()
+  local owners = dup_read_owners()
+  local labels = eq_labels()
+  local abn = {}
+  for _, e in ipairs(enum_list("app.EquipmentAbilityID")) do abn[e.value] = e.name end
+  local map, ncls, ex, lab = {}, {}, {}, {}
+  local total = 0
+  for _, o in ipairs(owners) do
+    for _, m in ipairs(o.masters) do
+      local item = try(function() return m:call("get_ItemData") end)
+      local isequip = item and try(function() return item:call("get_IsEquip") end)
+      if isequip then
+        total = total + 1
+        local key, base, slot, label = item_class(m)
+        lab[key] = label
+        ncls[key] = (ncls[key] or 0) + 1
+        local ab = get_ability(m)
+        local nm = try(function() return item:call("get_Name") end) or "?"
+        if ab then
+          for i = 1, 4 do
+            local id = try(function() return ab:get_field("Slot" .. i) end)
+            if type(id) == "number" and id ~= 0 then
+              map[key] = map[key] or {}
+              map[key][id] = (map[key][id] or 0) + 1
+              ex[key] = ex[key] or {}
+              ex[key][id] = ex[key][id] or clean(nm)
+            end
+          end
+        end
+      end
+    end
+  end
+  EQMAP = { map = map, ncls = ncls, lab = lab }
+  -- readable report (+ a few things about ItemManager for debugging)
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  L("item type = weapon job (from _Job) or armor _EquipCategory")
+  L(total .. " equipment items scanned")
+  local keys = {}
+  for k in pairs(map) do keys[#keys + 1] = k end
+  for k in pairs(ncls) do if not map[k] then keys[#keys + 1] = k end end
+  table.sort(keys)
+  for _, k in ipairs(keys) do
+    L("")
+    L(string.format("== %s  (%s)  %d items", k, lab[k] or "?", ncls[k] or 0))
+    local ids = {}
+    for id in pairs(map[k] or {}) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+      L(string.format("   %3d %-55s x%d  e.g. %s", id, abn[id] or "?", map[k][id], ex[k][id] or ""))
+    end
+  end
+  L("")
+  L("== ItemManager fields that look like ability tables ==")
+  local mgr = sdk.get_managed_singleton("app.ItemManager")
+  local td = mgr and mgr:get_type_definition()
+  local shown = 0
+  while td and shown < 80 do
+    for _, f in ipairs(td:get_fields() or {}) do
+      if not f:is_static() then
+        local n = f:get_name()
+        local ft = try(function() return f:get_type():get_full_name() end) or "?"
+        local ln = (n .. ft):lower()
+        if ln:find("abil", 1, true) or ln:find("lot", 1, true) or ln:find("restrict", 1, true) then
+          local v = try(function() return mgr:get_field(n) end)
+          local cnt = (type(v) == "userdata") and #coll_elems(v) or 0
+          L(string.format("   %s : %s%s", n, ft, cnt > 0 and (" (n=" .. cnt .. ")") or ""))
+          shown = shown + 1
+        end
+      end
+    end
+    td = try(function() return td:get_parent_type() end)
+  end
+  for _, l in ipairs(lines) do log.info(TAG .. "eqmap: " .. l) end
+  if not wr(DIR .. "eqmap.txt", table.concat(lines, "\n")) then error("could not write eqmap.txt") end
+  return total, #keys
+end
+
+COMMANDS.eqmap_build = function()
+  local total, k = eqmap_build()
+  return string.format("%d items, %d item types", total, k)
+end
+
+-- arg: item row (+ "1" to rescan). Returns "key|label|id,id,...|items of this type"
+COMMANDS.eqmap_valid = function(a)
+  local r = row_of(a[1])
+  if not EQMAP or a[2] == "1" then eqmap_build() end
+  local key, base, slot = item_class(r.master)
+  local set = {}
+  for id in pairs(EQMAP.map[key] or {}) do set[id] = true end
+  -- hard rule (matches the game data): JobNN_ExSkillK only on weapons of vocation NN
+  for _, e in ipairs(enum_list("app.EquipmentAbilityID")) do
+    local j = e.name:match("^Job(%d%d)_ExSkill%d$")
+    if j then
+      if base == "Weapon" and slot == tonumber(j) then set[e.value] = true else set[e.value] = nil end
+    end
+  end
+  local ids = {}
+  for id in pairs(set) do ids[#ids + 1] = id end
+  table.sort(ids)
+  return string.format("%s|%s|%s|%d", key, EQMAP.lab[key] or "?", table.concat(ids, ","), EQMAP.ncls[key] or 0)
+end
+
+---------------------------------------------------------------- v1.11 dump: where does the game keep "which skill fits which item type"?
+
+COMMANDS.abil_dump = function()
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local PAT = { "abil", "lot", "slot", "extens", "apprais", "categor", "restrict", "allow", "selectable", "equiptype", "part" }
+  local function hit(name)
+    local l = name:lower()
+    for _, p in ipairs(PAT) do if l:find(p, 1, true) then return true end end
+    return false
+  end
+
+  L("##### 1. ItemManager members (fields and methods) whose name suggests ability / slot / lot / category #####")
+  local itd = sdk.find_type_definition("app.ItemManager")
+  local t = itd
+  local seenm = {}
+  while t do
+    for _, f in ipairs(t:get_fields() or {}) do
+      local n = f:get_name()
+      if hit(n) and not seenm["f" .. n] then
+        seenm["f" .. n] = true
+        L("FIELD  " .. n .. " : " .. (try(function() return f:get_type():get_full_name() end) or "?") .. (f:is_static() and "  [static]" or ""))
+      end
+    end
+    for _, m in ipairs(t:get_methods() or {}) do
+      local k = msig(m)
+      if hit(m:get_name()) and not seenm[k] then
+        seenm[k] = true
+        L("METHOD " .. k)
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+
+  L("")
+  L("##### 2. Type graph around equipment abilities #####")
+  local roots = { "app.ItemManager", "app.EquipmentAbilityData", "app.ItemDefine.EquipmentAbilityParam",
+    "app.ItemDefine.StorageData", "app.EquipData", "app.ItemDefine" }
+  local visited, order = {}, {}
+  local queue = {}
+  for _, r in ipairs(roots) do
+    local td = sdk.find_type_definition(r)
+    if td then queue[#queue + 1] = { td = td, d = 0 } end
+  end
+  local function relevant(n)
+    local l = n:lower()
+    return n:sub(1, 4) == "app." and (l:find("abil", 1, true) or l:find("equip", 1, true) or l:find("lot", 1, true)
+      or l:find("categ", 1, true) or l:find("slot", 1, true) or l:find("itemdefine", 1, true))
+  end
+  local qi = 1
+  while qi <= #queue and #order < 500 do
+    local node = queue[qi]
+    qi = qi + 1
+    local n = tdn(node.td)
+    if n and not visited[n] then
+      visited[n] = node.td
+      order[#order + 1] = n
+      if node.d < 3 then
+        local refs = {}
+        for _, f in ipairs(node.td:get_fields() or {}) do refs[#refs + 1] = try(function() return f:get_type() end) end
+        for _, m in ipairs(node.td:get_methods() or {}) do
+          refs[#refs + 1] = try(function() return m:get_return_type() end)
+          for _, p in ipairs(m:get_param_types() or {}) do refs[#refs + 1] = p end
+        end
+        for _, rt in ipairs(refs) do
+          local rn = rt and tdn(rt)
+          if rn and relevant(rn) and not visited[rn] then queue[#queue + 1] = { td = rt, d = node.d + 1 } end
+        end
+      end
+    end
+  end
+  table.sort(order)
+  L(#order .. " related types found:")
+  for _, n in ipairs(order) do L("   " .. n) end
+
+  L("")
+  L("##### 3. Members of every related type with 'Abil' in its name #####")
+  local ntypes = 0
+  for _, n in ipairs(order) do
+    if n:lower():find("abil", 1, true) and ntypes < 40 then
+      ntypes = ntypes + 1
+      local td = visited[n]
+      L("--- " .. n)
+      local c = 0
+      for _, f in ipairs(td:get_fields() or {}) do
+        if c < 60 then
+          c = c + 1
+          L("   F " .. f:get_name() .. " : " .. (try(function() return f:get_type():get_full_name() end) or "?") .. (f:is_static() and " [static]" or ""))
+        end
+      end
+      local mc = 0
+      for _, m in ipairs(td:get_methods() or {}) do
+        if mc < 60 then mc = mc + 1 L("   M " .. msig(m)) end
+      end
+    end
+  end
+
+  L("")
+  L("##### 4. Raw data of sample items (ItemData + Weapon/Armor param) #####")
+  local owners = dup_read_owners()
+  local w, ar, seen_names = 0, 0, {}
+  for _, o in ipairs(owners) do
+    for _, m in ipairs(o.masters) do
+      local item = try(function() return m:call("get_ItemData") end)
+      if type(item) == "userdata" and (w < 2 or ar < 6) then
+        local nm = try(function() return item:call("get_Name") end) or "?"
+        local wp = try(function() return item:call("get_WeaponParam") end)
+        local ap = try(function() return item:call("get_ArmorParam") end)
+        if not seen_names[nm] and ((wp and w < 2) or (ap and ar < 6)) then
+          seen_names[nm] = true
+          if wp then w = w + 1 else ar = ar + 1 end
+          L("")
+          L(">>> " .. tostring(nm))
+          flat_fields(L, item, "ItemData")
+          if wp then flat_fields(L, wp, "WeaponParam") end
+          if ap then flat_fields(L, ap, "ArmorParam") end
+          flat_fields(L, m, "InventoryEntry")
+        end
+      end
+    end
+  end
+
+  L("")
+  L("##### 5. Enums #####")
+  for _, en in ipairs({ "app.EquipData.SlotEnum" }) do
+    for _, e in ipairs(enum_list(en)) do L(string.format("%s  %s = %s", en, e.name, fmt_int(e.value))) end
+  end
+  for _, l in ipairs(lines) do log.info(TAG .. "abildump: " .. l) end
+  if not wr(DIR .. "abildump.txt", table.concat(lines, "\n")) then error("could not write abildump.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.12 dump 2: appraisal data (where abilities are rolled per item category)
+COMMANDS.abil_dump2 = function()
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local itm = sdk.get_managed_singleton("app.ItemManager")
+  L("##### A. ItemManager appraisal / ability-flag objects #####")
+  for _, n in ipairs({ "AppraisalItemInfo", "AppraisalItemDropWeight", "GetEquipmentAbilityIdFlag" }) do
+    local v = itm and try(function() return itm:get_field(n) end)
+    L("")
+    if v then dump_obj(L, v, n, 3, 4) else L(n .. " not readable") end
+  end
+
+  L("")
+  L("##### B. members of the related types #####")
+  local roots = { "app.AppraisalItemInfoManager", "app.AppraisalItemDropWeightManager", "app.FlagController",
+    "app.ItemDefine.EquipmentAbilityParam", "app.ItemDefine.StorageData", "app.ItemEquipParam", "app.EquipParam",
+    "app.EquipSpecial", "app.GUIAppraisalDefine.AppraisalItemLevel", "app.AppraiseItemRimCostSettingData" }
+  local visited, order, queue = {}, {}, {}
+  for _, r in ipairs(roots) do
+    local td = sdk.find_type_definition(r)
+    if td then queue[#queue + 1] = { td = td, d = 0 } end
+  end
+  local function relevant(n)
+    local l = n:lower()
+    return n:sub(1, 4) == "app." and (l:find("apprais", 1, true) or l:find("abil", 1, true) or l:find("dropweight", 1, true))
+  end
+  local qi = 1
+  while qi <= #queue and #order < 80 do
+    local node = queue[qi]
+    qi = qi + 1
+    local n = tdn(node.td)
+    if n and not visited[n] then
+      visited[n] = node.td
+      order[#order + 1] = n
+      if node.d < 2 then
+        local refs = {}
+        for _, f in ipairs(node.td:get_fields() or {}) do refs[#refs + 1] = try(function() return f:get_type() end) end
+        for _, m in ipairs(node.td:get_methods() or {}) do
+          refs[#refs + 1] = try(function() return m:get_return_type() end)
+          for _, p in ipairs(m:get_param_types() or {}) do refs[#refs + 1] = p end
+        end
+        for _, rt in ipairs(refs) do
+          local rn = rt and tdn(rt)
+          if rn and relevant(rn) and not visited[rn] then queue[#queue + 1] = { td = rt, d = node.d + 1 } end
+        end
+      end
+    end
+  end
+  for _, n in ipairs(order) do
+    local td = visited[n]
+    L("--- " .. n)
+    local c = 0
+    for _, f in ipairs(td:get_fields() or {}) do
+      if c < 80 then c = c + 1 L("   F " .. f:get_name() .. " : " .. (try(function() return f:get_type():get_full_name() end) or "?") .. (f:is_static() and " [static]" or "")) end
+    end
+    local mc = 0
+    for _, m in ipairs(td:get_methods() or {}) do
+      if mc < 80 then mc = mc + 1 L("   M " .. msig(m)) end
+    end
+  end
+
+  L("")
+  L("##### C. enums #####")
+  for _, en in ipairs({ "app.ItemEquipCategory", "app.Character.JobEnum", "app.GuiDefine.EquipmentGrade" }) do
+    for _, e in ipairs(enum_list(en)) do L(string.format("%s  %s = %s", en, e.name, fmt_int(e.value))) end
+  end
+  for _, l in ipairs(lines) do log.info(TAG .. "abildump2: " .. l) end
+  if not wr(DIR .. "abildump2.txt", table.concat(lines, "\n")) then error("could not write abildump2.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.13 dump 3: EquipmentAbilityData + live validity probe
+COMMANDS.abil_dump3 = function()
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local itm = sdk.get_managed_singleton("app.ItemManager")
+
+  local function relevant(n)
+    local l = n:lower()
+    return n:sub(1, 4) == "app." and (l:find("abil", 1, true) or l:find("equipmentability", 1, true))
+  end
+
+  -- A. type graph from the ability master data
+  L("##### A. EquipmentAbilityData type graph (all fields and methods, nothing capped except 300 members/type) #####")
+  local roots = { "app.EquipmentAbilityData", "app.ItemDefine.EquipmentAbilityParam", "app.EquipmentAbilityBonus" }
+  local visited, order, queue = {}, {}, {}
+  for _, r in ipairs(roots) do
+    local td = sdk.find_type_definition(r)
+    if td then queue[#queue + 1] = { td = td, d = 0 } else L("type not found: " .. r) end
+  end
+  local qi = 1
+  while qi <= #queue and #order < 150 do
+    local node = queue[qi]
+    qi = qi + 1
+    local n = tdn(node.td)
+    if n and not visited[n] then
+      visited[n] = node.td
+      order[#order + 1] = n
+      if node.d < 4 then
+        local refs = {}
+        for _, f in ipairs(node.td:get_fields() or {}) do refs[#refs + 1] = try(function() return f:get_type() end) end
+        for _, m in ipairs(node.td:get_methods() or {}) do
+          refs[#refs + 1] = try(function() return m:get_return_type() end)
+          for _, p in ipairs(m:get_param_types() or {}) do refs[#refs + 1] = p end
+        end
+        for _, rt in ipairs(refs) do
+          local rn = rt and tdn(rt)
+          if rn and relevant(rn) and not visited[rn] then queue[#queue + 1] = { td = rt, d = node.d + 1 } end
+        end
+      end
+    end
+  end
+  L(#order .. " types: " .. table.concat(order, ", "))
+  for _, n in ipairs(order) do
+    local td = visited[n]
+    local par = try(function() return td:get_parent_type():get_full_name() end) or "?"
+    L("")
+    L("--- " .. n .. "   (parent " .. par .. ")")
+    local c = 0
+    for _, f in ipairs(td:get_fields() or {}) do
+      if c < 300 then c = c + 1 L("   F " .. f:get_name() .. " : " .. (try(function() return f:get_type():get_full_name() end) or "?") .. (f:is_static() and " [static]" or "")) end
+    end
+    c = 0
+    for _, m in ipairs(td:get_methods() or {}) do
+      if c < 300 then c = c + 1 L("   M " .. msig(m) .. (try(function() return m:is_static() end) and " [static]" or "")) end
+    end
+  end
+
+  -- B. every ItemManager method that mentions abilities / categories / jobs
+  L("")
+  L("##### B. ItemManager methods mentioning ability / category / job types #####")
+  local keys = { "EquipmentAbilityID", "EquipmentAbilityParam", "EquipmentAbilityData", "ItemEquipCategory", "JobEnum", "EquipmentAbilityBonus" }
+  local t, seenm = sdk.find_type_definition("app.ItemManager"), {}
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local k = msig(m)
+      if not seenm[k] then
+        seenm[k] = true
+        for _, key in ipairs(keys) do
+          if k:find(key, 1, true) then L("   " .. k) break end
+        end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+
+  -- C. live instances
+  L("")
+  L("##### C. live objects of ability types (ItemManager fields, guessed singletons, static getters) #####")
+  local insts = {}
+  local function add_inst(label, obj)
+    if type(obj) ~= "userdata" then return end
+    local td = try(function() return obj:get_type_definition() end)
+    if not td then return end
+    insts[#insts + 1] = { label = label, obj = obj, td = td }
+    L("")
+    dump_obj(L, obj, label, 3, 6)
+  end
+  local ft = sdk.find_type_definition("app.ItemManager")
+  local seenf = {}
+  while ft and itm do
+    for _, f in ipairs(ft:get_fields() or {}) do
+      local n = f:get_name()
+      local tn = (try(function() return f:get_type():get_full_name() end) or "")
+      if not seenf[n] and not f:is_static() and relevant(tn) then
+        seenf[n] = true
+        add_inst("ItemManager." .. n, try(function() return itm:get_field(n) end))
+      end
+    end
+    ft = try(function() return ft:get_parent_type() end)
+  end
+  for _, sn in ipairs({ "app.EquipmentAbilityManager", "app.EquipmentAbilityDataManager", "app.AbilityManager",
+    "app.ItemDataManager", "app.DataManager", "app.ItemDefine" }) do
+    local o = try(function() return sdk.get_managed_singleton(sn) end)
+    if o then
+      L("")
+      L("singleton found: " .. sn)
+      local sd = try(function() return o:get_type_definition() end)
+      for _, f in ipairs(sd and sd:get_fields() or {}) do
+        local tn = (try(function() return f:get_type():get_full_name() end) or "")
+        if relevant(tn) and not f:is_static() then add_inst(sn .. "." .. f:get_name(), try(function() return o:get_field(f:get_name()) end)) end
+      end
+    end
+  end
+  for _, n in ipairs(order) do
+    local td = visited[n]
+    for _, m in ipairs(td:get_methods() or {}) do
+      local nm = m:get_name()
+      if try(function() return m:is_static() end) and #(m:get_param_types() or {}) == 0 and nm:sub(1, 4) == "get_" then
+        local rt = try(function() return m:get_return_type():get_full_name() end) or ""
+        if relevant(rt) then add_inst(n .. "::" .. nm .. "()", try(function() return m:call(nil) end)) end
+      end
+    end
+  end
+  if #insts == 0 then L("no live ability objects found by these routes") end
+
+  -- D. probe: pure-looking predicate methods swept over ability id x category/job
+  L("")
+  L("##### D. predicate probe: is/can/check/has/enable methods returning Boolean, params limited to ability id / category / job / int #####")
+  local OKP = { ["app.EquipmentAbilityID"] = "abil", ["app.ItemEquipCategory"] = "cat", ["app.Character.JobEnum"] = "job", ["System.Int32"] = "int", ["System.Byte"] = "int" }
+  local calls = 0
+  local function probe(label, obj, td)
+    local t2, seen = td, {}
+    while t2 do
+      for _, m in ipairs(t2:get_methods() or {}) do
+        local nm = m:get_name()
+        local ln = nm:lower()
+        local rt = try(function() return m:get_return_type():get_full_name() end)
+        local pts = m:get_param_types() or {}
+        local key = msig(m)
+        if not seen[key] and rt == "System.Boolean" and (ln:find("^is") or ln:find("^can") or ln:find("^check") or ln:find("^has") or ln:find("^enable"))
+          and #pts >= 1 and #pts <= 2 then
+          local kinds, good = {}, true
+          for i, p in ipairs(pts) do
+            kinds[i] = OKP[tdn(p) or ""]
+            if not kinds[i] then good = false end
+          end
+          local hasAbil = false
+          for _, k in ipairs(kinds) do if k == "abil" then hasAbil = true end end
+          seen[key] = true
+          if good and hasAbil and calls < 6000 then
+            L("")
+            L("probe " .. label .. " :: " .. key)
+            local static = try(function() return m:is_static() end)
+            local self = (not static) and obj or nil
+            if (not static) and not obj then L("   (needs instance, none available)")
+            elseif #pts == 1 then
+              local on = {}
+              for a = 0, 78 do
+                calls = calls + 1
+                local ok, r = pcall(function() return m:call(self, a) end)
+                if ok and (r == true or r == 1) then on[#on + 1] = tostring(a) end
+              end
+              L("   true for ability ids: " .. table.concat(on, ","))
+            else
+              local aIdx = (kinds[1] == "abil") and 1 or 2
+              local oIdx = 3 - aIdx
+              for a = 1, 78 do
+                local on = {}
+                for o = 0, 10 do
+                  calls = calls + 1
+                  local ok, r
+                  if aIdx == 1 then ok, r = pcall(function() return m:call(self, a, o) end)
+                  else ok, r = pcall(function() return m:call(self, o, a) end) end
+                  if ok and (r == true or r == 1) then on[#on + 1] = tostring(o) end
+                end
+                L(string.format("   ability %d (%s) %s=%s", a, "", kinds[oIdx], table.concat(on, ",")))
+              end
+            end
+          end
+        end
+      end
+      t2 = try(function() return t2:get_parent_type() end)
+    end
+  end
+  local probed = {}
+  for _, i in ipairs(insts) do probed[#probed + 1] = { label = i.label, obj = i.obj, td = i.td } end
+  probed[#probed + 1] = { label = "ItemManager", obj = itm, td = sdk.find_type_definition("app.ItemManager") }
+  for _, n in ipairs(order) do probed[#probed + 1] = { label = n .. " (static only)", obj = nil, td = visited[n] } end
+  for _, p in ipairs(probed) do if p.td then probe(p.label, p.obj, p.td) end end
+  L("")
+  L("probe calls made: " .. calls)
+
+  L("")
+  L("##### E. ability id names (from app.EquipmentAbilityID) #####")
+  for _, e in ipairs(enum_list("app.EquipmentAbilityID")) do L(string.format("%d %s", e.value, e.name)) end
+
+  for _, l in ipairs(lines) do log.info(TAG .. "abildump3: " .. l) end
+  if not wr(DIR .. "abildump3.txt", table.concat(lines, "\n")) then error("could not write abildump3.txt") end
+  return tostring(#lines)
+end
+
+-- v1.13.1: everything the game has about core (normal) skills for the target, to find what Enable ALL misses
+COMMANDS.core_dump = function(a)
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local c = get_target(a[1])
+  local job = int(a[2])
+  L("target = " .. tostring(a[1]) .. "   vocation = " .. tostring(job))
+  L("")
+  L("##### 1. every app.HumanNormalSkillID entry and its state for this target #####")
+  for _, ent in ipairs(enum_list("app.HumanNormalSkillID")) do
+    local en = try(function() return c.skill:call("isNormalSkillEnable", ent.value) end)
+    L(string.format("%d\t%s\tjob=%s\tenabled=%s", ent.value, ent.name, tostring(job_of(ent.name)), tostring(en)))
+  end
+  L("")
+  L("##### 2. SkillContext methods and fields mentioning normal / enable / learn / lock #####")
+  local td, seen = c.skill:get_type_definition(), {}
+  L("type " .. (tdn(td) or "?"))
+  local t = td
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local k = msig(m)
+      local l = k:lower()
+      if not seen[k] and (l:find("normal", 1, true) or l:find("enable", 1, true) or l:find("learn", 1, true) or l:find("lock", 1, true) or l:find("acquire", 1, true)) then
+        seen[k] = true
+        L("   M " .. k)
+      end
+    end
+    for _, f in ipairs(t:get_fields() or {}) do
+      L("   F " .. f:get_name() .. " : " .. (try(function() return f:get_type():get_full_name() end) or "?"))
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  L("")
+  L("##### 3. SkillContext object contents #####")
+  dump_obj(L, c.skill, "SkillContext", 2, 8)
+  L("")
+  L("##### 4. JobContext methods mentioning level / rank / normal #####")
+  if c.job then
+    local jt, js = c.job:get_type_definition(), {}
+    while jt do
+      for _, m in ipairs(jt:get_methods() or {}) do
+        local k = msig(m)
+        local l = k:lower()
+        if not js[k] and (l:find("level", 1, true) or l:find("rank", 1, true) or l:find("normal", 1, true) or l:find("skill", 1, true)) then
+          js[k] = true
+          L("   M " .. k)
+        end
+      end
+      jt = try(function() return jt:get_parent_type() end)
+    end
+    L("")
+    dump_obj(L, c.job, "JobContext", 2, 8)
+  else
+    L("no JobContext")
+  end
+  for _, l in ipairs(lines) do log.info(TAG .. "coredump: " .. l) end
+  if not wr(DIR .. "coredump.txt", table.concat(lines, "\n")) then error("could not write coredump.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.14 jump height / air time / no fall damage
+-- Jump height and air time come from the "Super Jump Updated" mod: JumpParam.MaxRootHeight and a scale on
+-- HumanJumpRootAdjuster.ElapsedFrame. No fall damage patches every numeric field under the player's Action param whose
+-- path contains "fall" (damage rate/factor -> 0, start height/distance -> very large) and restores the originals when switched off.
+local JUMP = { height = nil, orig_height = nil, air = 1.0, nofall = false, active = false, human = nil, fall_orig = {}, cache = nil }
+
+local function jump_ctx()
+  local c = get_target("player")
+  local pr = try(function() return c.human:call("get_Param") end)
+  local act = pr and try(function() return pr:call("get_Action") end)
+  if not act then error("player Action param not found") end
+  local jp = try(function() return act:get_field("JumpParam") end) or try(function() return act.JumpParam end)
+  if not jp then error("JumpParam not found") end
+  return c, act, jp
+end
+
+local function jp_read(jp)
+  local v = try(function() return jp:get_field("MaxRootHeight") end)
+  if type(v) ~= "number" then v = try(function() return jp.MaxRootHeight end) end
+  return v
+end
+
+local function jp_write(jp, v)
+  if not pcall(function() jp:set_field("MaxRootHeight", v + 0.0) end) then jp.MaxRootHeight = v + 0.0 end
+end
+
+local function fall_scan(root, words)
+  local out, seen, count = {}, {}, 0
+  local function matches(lp)
+    for _, w in ipairs(words) do if lp:find(w, 1, true) then return true end end
+    return false
+  end
+  local function walk(obj, path, depth)
+    local t = try(function() return obj:get_type_definition() end)
+    while t do
+      for _, f in ipairs(t:get_fields() or {}) do
+        if count < 800 and not f:is_static() then
+          local n = f:get_name()
+          local key = path .. "." .. n
+          if not seen[key] then
+            seen[key] = true
+            count = count + 1
+            local tn = try(function() return f:get_type():get_full_name() end) or ""
+            local v = try(function() return obj:get_field(n) end)
+            if type(v) == "number" then
+              if matches(key:lower()) then out[#out + 1] = { obj = obj, name = n, path = key, val = v, tn = tn } end
+            elseif type(v) == "userdata" and depth < 3 and tn:sub(1, 4) == "app." and not tn:find("[]", 1, true) and not tn:find("`", 1, true) then
+              walk(v, key, depth + 1)
+            end
+          end
+        end
+      end
+      t = try(function() return t:get_parent_type() end)
+    end
+  end
+  walk(root, "Action", 0)
+  return out
+end
+
+local function fall_plan(e)
+  local l = e.name:lower()
+  local isint = math.type(e.val) == "integer"
+  if l:find("height", 1, true) or l:find("distance", 1, true) or l:find("threshold", 1, true) or l:find("border", 1, true)
+    or l:find("limit", 1, true) or l:find("start", 1, true) then
+    if not isint then return 100000.0 end
+    if e.tn:find("Int32", 1, true) then return 1000000 end
+    if e.tn:find("Int16", 1, true) and not e.tn:find("UInt16", 1, true) then return 30000 end
+    return nil
+  end
+  if l:find("damage", 1, true) or l:find("rate", 1, true) or l:find("ratio", 1, true) or l:find("factor", 1, true)
+    or l:find("percent", 1, true) or l:find("hp", 1, true) then
+    return isint and 0 or 0.0
+  end
+  return nil
+end
+
+local function fall_apply(act)
+  local addr = try(function() return act:get_address() end)
+  if not (JUMP.cache and JUMP.cache.addr == addr) then
+    JUMP.cache = { addr = addr, list = fall_scan(act, { "fall" }) }
+  end
+  local names, n = {}, 0
+  for _, e in ipairs(JUMP.cache.list) do
+    local ent = JUMP.fall_orig[e.path]
+    if JUMP.nofall then
+      local nv = fall_plan(e)
+      if nv ~= nil then
+        if not ent then ent = { orig = e.val } JUMP.fall_orig[e.path] = ent end
+        ent.obj, ent.name = e.obj, e.name
+        if pcall(function() e.obj:set_field(e.name, nv) end) then n = n + 1 names[#names + 1] = e.path end
+      end
+    elseif ent then
+      pcall(function() e.obj:set_field(e.name, ent.orig) end)
+      n = n + 1
+    end
+  end
+  if not JUMP.nofall then JUMP.fall_orig = {} end
+  return n, names
+end
+
+local function jump_apply()
+  local c, act, jp = jump_ctx()
+  if JUMP.orig_height == nil then JUMP.orig_height = jp_read(jp) end
+  JUMP.human = c.human
+  if JUMP.height then jp_write(jp, JUMP.height) end
+  local n, names = fall_apply(act)
+  return n, names
+end
+
+local jat = sdk.find_type_definition("app.HumanJumpRootAdjuster")
+if jat then
+  pcall(function()
+    sdk.hook(jat:get_method("update"), function(args)
+      if JUMP.air ~= 1.0 and JUMP.human then
+        pcall(function()
+          local this = sdk.to_managed_object(args[2])
+          if this and this.Human == JUMP.human then this.ElapsedFrame = this.ElapsedFrame * JUMP.air end
+        end)
+      end
+    end, nil)
+  end)
+end
+
+local jump_last = 0
+re.on_frame(function()
+  if not JUMP.active then return end
+  local now = os.clock()
+  if now - jump_last < 1.0 then return end
+  jump_last = now
+  pcall(jump_apply)
+end)
+
+-- args: height ("" = leave), air time scale, no fall damage 0/1
+COMMANDS.jump_set = function(a)
+  local h = tonumber(a[1] or "")
+  if h then JUMP.height = h end
+  JUMP.air = tonumber(a[2] or "") or JUMP.air
+  JUMP.nofall = (a[3] == "1")
+  JUMP.active = true
+  local n, names = jump_apply()
+  local msg = string.format("height=%s air=%s", tostring(JUMP.height), tostring(JUMP.air))
+  if JUMP.nofall then
+    msg = msg .. string.format("; no fall damage: %d field(s) patched", n)
+    if n == 0 then msg = msg .. " (none found - use DUMP jump/fall data and send it)" else msg = msg .. " [" .. table.concat(names, ", ") .. "]" end
+  else
+    msg = msg .. "; no fall damage off"
+  end
+  return msg
+end
+
+COMMANDS.jump_get = function()
+  local c, act, jp = jump_ctx()
+  local cur = jp_read(jp)
+  if JUMP.orig_height == nil then JUMP.orig_height = cur end
+  return string.format("%s,%s,%s,%s", tostring(JUMP.orig_height), tostring(cur), tostring(JUMP.air), JUMP.nofall and "1" or "0")
+end
+
+COMMANDS.jump_reset = function()
+  local c, act, jp = jump_ctx()
+  if JUMP.orig_height ~= nil then jp_write(jp, JUMP.orig_height) end
+  JUMP.height, JUMP.air, JUMP.nofall, JUMP.active = nil, 1.0, false, false
+  fall_apply(act)
+  return "reset to game values (" .. tostring(JUMP.orig_height) .. ")"
+end
+
+COMMANDS.jump_probe = function()
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local c, act, jp = jump_ctx()
+  L("##### JumpParam #####")
+  dump_obj(L, jp, "JumpParam", 2, 6)
+  L("")
+  L("##### numeric fields under the Action param whose path contains fall / land / drop (P = would be patched by No fall damage) #####")
+  for _, e in ipairs(fall_scan(act, { "fall", "land", "drop" })) do
+    local plan = e.path:lower():find("fall", 1, true) and fall_plan(e) or nil
+    L(string.format("%s %s = %s  (%s)%s", plan ~= nil and "P" or "-", e.path, tostring(e.val), e.tn, plan ~= nil and ("  -> " .. tostring(plan)) or ""))
+  end
+  L("")
+  L("##### Action param type: field names and types (top level) #####")
+  local t = try(function() return act:get_type_definition() end)
+  while t do
+    for _, f in ipairs(t:get_fields() or {}) do
+      L("   F " .. f:get_name() .. " : " .. (try(function() return f:get_type():get_full_name() end) or "?"))
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  L("")
+  L("##### Human methods mentioning fall / land #####")
+  local ht, seen = c.human:get_type_definition(), {}
+  while ht do
+    for _, m in ipairs(ht:get_methods() or {}) do
+      local k = msig(m)
+      local l = k:lower()
+      if not seen[k] and (l:find("fall", 1, true) or l:find("land", 1, true)) then seen[k] = true L("   M " .. k) end
+    end
+    ht = try(function() return ht:get_parent_type() end)
+  end
+  for _, l in ipairs(lines) do log.info(TAG .. "jumpprobe: " .. l) end
+  if not wr(DIR .. "jumpprobe.txt", table.concat(lines, "\n")) then error("could not write jumpprobe.txt") end
+  return tostring(#lines)
+end
+
+---------------------------------------------------------------- v1.23: faster enemy respawn
+-- Adapted from FasterRespawn.lua. Hooks installed at load; the commands below
+-- just adjust the hours. Rest at a camp/inn once to trigger the reload.
+local RESPAWN = { boss = 1, normal = 1, is_boss = false,
+                  boss_def = nil, normal_def = nil, day_def = nil }
+do
+  local td = try(function() return sdk.find_type_definition("app.GenerateDefaultParameter") end)
+  local m = td and try(function() return td:get_method("getDeadCharaRepopTime") end)
+  if m then
+    sdk.hook(m,
+      function(args)
+        local v = try(function() return sdk.to_int64(args[3]) end)
+        RESPAWN.is_boss = (v and v > 0) and true or false
+      end,
+      function(retval)
+        -- capture the game's original default once, then override
+        local orig = try(function() return sdk.to_int64(retval) end)
+        if orig ~= nil then
+          if RESPAWN.is_boss and RESPAWN.boss_def == nil then
+            RESPAWN.boss_def = orig
+            log.info(TAG .. "respawn: captured boss default " .. tostring(orig) .. "h")
+          elseif not RESPAWN.is_boss and RESPAWN.normal_def == nil then
+            RESPAWN.normal_def = orig
+            log.info(TAG .. "respawn: captured normal default " .. tostring(orig) .. "h")
+          end
+        end
+        return sdk.to_ptr(RESPAWN.is_boss and RESPAWN.boss or RESPAWN.normal)
+      end)
+    log.info(TAG .. "respawn hook: getDeadCharaRepopTime")
+  else
+    log.info(TAG .. "respawn hook: getDeadCharaRepopTime NOT FOUND")
+  end
+  local gm = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local rm = gm and try(function() return gm:get_method("get_RepopDay") end)
+  if rm then
+    sdk.hook(rm, function(args) end, function(retval)
+      if RESPAWN.day_def == nil then
+        RESPAWN.day_def = try(function() return sdk.to_int64(retval) end)
+        log.info(TAG .. "respawn: captured repop-day default " .. tostring(RESPAWN.day_def))
+      end
+      return sdk.to_ptr(0)
+    end)
+    log.info(TAG .. "respawn hook: get_RepopDay -> 0")
+  else
+    log.info(TAG .. "respawn hook: get_RepopDay NOT FOUND")
+  end
+end
+
+-- args: boss hours, normal hours
+COMMANDS.respawn_set = function(a)
+  local b = tonumber(a[1]); local n = tonumber(a[2])
+  if b then RESPAWN.boss = math.max(0, math.floor(b)) end
+  if n then RESPAWN.normal = math.max(0, math.floor(n)) end
+  return string.format("respawn times: boss %dh, normal %dh (rest at a camp/inn once to trigger)",
+    RESPAWN.boss, RESPAWN.normal)
+end
+
+COMMANDS.respawn_get = function()
+  return string.format("%d,%d", RESPAWN.boss, RESPAWN.normal)
+end
+
+local function _defstr(v) return v == nil and "?" or tostring(v) end
+
+-- "?" for any default the game has not reported yet (kill/rest first)
+COMMANDS.respawn_defaults = function()
+  return string.format("%s,%s,%s",
+    _defstr(RESPAWN.boss_def), _defstr(RESPAWN.normal_def), _defstr(RESPAWN.day_def))
+end
+
+COMMANDS.respawn_reset = function()
+  if RESPAWN.boss_def ~= nil then RESPAWN.boss = RESPAWN.boss_def end
+  if RESPAWN.normal_def ~= nil then RESPAWN.normal = RESPAWN.normal_def end
+  return string.format("%d,%d", RESPAWN.boss, RESPAWN.normal)
+end
+
+-- Fast-forward ~3 days so corpses decompose and repop hooks trigger.
+-- Discovers the real TimeManager API at runtime and reports what it did.
+COMMANDS.respawn_clear = function(a)
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local tm = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
+  if not tm then error("TimeManager unavailable") end
+  local day0 = try(function() return tm:get_InGameDay() end)
+  L("day before: " .. tostring(day0))
+
+  -- 1. look for a direct time-skip / set method
+  local td = try(function() return sdk.find_type_definition("app.TimeManager") end)
+  local tried = {}
+  if td then
+    for _, m in ipairs(td:get_methods() or {}) do
+      local n = try(function() return m:get_name() end) or ""
+      local l = n:lower()
+      if (l:find("skip", 1, true) or l:find("advanc", 1, true)
+          or l:find("settime", 1, true) or l:find("addtime", 1, true)
+          or l:find("fastforward", 1, true))
+         and not l:find("get", 1, true) then
+        tried[#tried + 1] = n
+        L("candidate: " .. n)
+      end
+    end
+  end
+
+  -- 2. try common time-skip signatures (72h), most promising first
+  local done = false
+  local attempts = {
+    { "skipTime", { 72.0 } }, { "SkipTime", { 72.0 } },
+    { "advanceTime", { 72.0 } }, { "addTime", { 72.0 } },
+    { "setInGameHour", { 72.0 } },
+  }
+  for _, at in ipairs(attempts) do
+    local name, args = at[1], at[2]
+    local ok = pcall(function()
+      local m = td and td:get_method(name)
+      if not m then error("no method") end
+      tm:call(name, table.unpack(args))
+    end)
+    if ok then L("called " .. name .. "(72)"); done = true; break end
+  end
+
+  -- 3. fallback: bump likely backing fields directly
+  if not done and td then
+    for _, f in ipairs(td:get_fields() or {}) do
+      local n = try(function() return f:get_name() end) or ""
+      local l = n:lower()
+      if l:find("elapsed", 1, true) and (l:find("hour", 1, true) or l:find("time", 1, true)) then
+        local v = try(function() return tm:get_field(n) end)
+        if type(v) == "number" then
+          pcall(function() tm:set_field(n, v + 72.0) end)
+          L("field " .. n .. ": " .. tostring(v) .. " -> " .. tostring(v + 72.0))
+          done = true
+          break
+        end
+      end
+    end
+  end
+
+  local day1 = try(function() return tm:get_InGameDay() end)
+  L("day after: " .. tostring(day1))
+  if not done then
+    L("no time-skip API found - rest at a camp/inn to advance time instead")
+  end
+  return table.concat(lines, " | ")
+end
+
+---------------------------------------------------------------- v1.24: fast travel (FastTravelAnywhere core, no hotkeys/UI)
+-- Engine warp via TimeSkipManager.requestPlayerWarp: clean sector streaming and
+-- pawn party teleportation. 6s post-warp fall-damage immunity. Altitude modes:
+-- "fixed" = pins drop from altitude, landmarks land near ground; "offset" =
+-- land <alt> meters above the destination.
+local FT_INVULN_UNTIL = 0
+do
+  local td = try(function() return sdk.find_type_definition("app.Human") end)
+  local m = td and try(function() return td:get_method("Chara_DamageFromFallHandler(System.Single)") end)
+  if m then
+    pcall(sdk.hook, m, function(args)
+      if os.clock() < FT_INVULN_UNTIL then
+        return sdk.PreHookResult.SKIP_ORIGINAL
+      end
+    end, nil)
+    log.info(TAG .. "fast travel: 6s post-warp fall immunity hook installed")
+  else
+    log.info(TAG .. "fast travel: fall handler NOT FOUND (no grace period)")
+  end
+end
+
+local FT_UI = nil
+do
+  local td = try(function() return sdk.find_type_definition("app.ui040205") end)
+  if td then
+    for _, mn in ipairs({ "addMapIconInfoList", "setPin", "setupIconName" }) do
+      local m = try(function() return td:get_method(mn) end)
+      if m then
+        pcall(sdk.hook, m, function(args)
+          FT_UI = try(function() return sdk.to_managed_object(args[2]) end) or FT_UI
+        end, nil)
+      end
+    end
+  end
+end
+
+local function ft_gui_mgr()
+  return try(function() return sdk.get_managed_singleton("app.GuiManager") end)
+end
+
+local function ft_icon_pos()
+  local g = ft_gui_mgr()
+  if g then
+    local list = try(function() return g:get_field("_MapPinList_k__BackingField") end)
+    local n = (list and try(function() return list:get_Count() end)) or 0
+    if n > 0 then
+      local icon = try(function() return list:get_Item(0) end)
+      local pos = icon and (try(function() return icon:get_field("Pos") end)
+        or try(function() return icon:get_field("Position") end))
+      if pos then return pos, "pin" end
+    end
+  end
+  if FT_UI then
+    local sel = try(function() return FT_UI:get_field("SelectedIcon") end)
+    local pos = sel and (try(function() return sel:get_field("Pos") end)
+      or try(function() return sel:get_field("Position") end))
+    if pos then return pos, "landmark" end
+  end
+  return nil, nil
+end
+
+local function ft_quest_pos()
+  local g = ft_gui_mgr()
+  if not g then return nil end
+  return try(function()
+    local ml = g:get_QuestTargetMarkerList()
+    if not ml or ml:get_Count() == 0 then return nil end
+    local mk = ml:get_Item(0)
+    local pos = mk and mk.Pos
+    if not pos or (pos.x == 0 and pos.y == 0 and pos.z == 0) then return nil end
+    return pos
+  end)
+end
+
+local function ft_warp(pos, kind, mode, alt)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not cm then error("CharacterManager unavailable") end
+  local player = try(function() return cm:get_field("<ManualPlayer>k__BackingField") end)
+  if not player then error("player not loaded") end
+  alt = tonumber(alt) or 350.0
+  local ty
+  if mode == "offset" then
+    ty = (pos.y or 0) + alt
+  elseif kind == "landmark" or (pos.y and pos.y >= 35.0) then
+    ty = pos.y + 5.0
+  else
+    ty = math.min(math.max(alt, 100.0), 2000.0)
+  end
+  FT_INVULN_UNTIL = os.clock() + 6.0
+  local tsm = try(function() return sdk.get_managed_singleton("app.TimeSkipManager") end)
+  local tm = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
+  if tsm and tm then
+    local ok = pcall(function()
+      local hr = tm:get_InGameHour()
+      local mn = tm:get_InGameMinute()
+      local dy = tm:get_InGameDay()
+      local ptd = sdk.find_type_definition("via.Position")
+      local upos = ValueType.new(ptd)
+      upos.x, upos.y, upos.z = pos.x, ty, pos.z
+      local transform = try(function() return player:get_Transform() end)
+      local rot = transform and try(function() return transform:get_Rotation() end)
+      tsm:call("requestPlayerWarp", hr, mn, dy, upos, rot, nil, true, true)
+    end)
+    if ok then return string.format("warped to (%.1f, %.1f, %.1f) [6s fall immunity]", pos.x, ty, pos.z) end
+  end
+  local transform = try(function() return player:get_Transform() end)
+  if not transform then error("warp failed (no TimeSkipManager, no transform)") end
+  local ok = pcall(function()
+    transform:set_Position(Vector3f.new(pos.x, ty, pos.z))
+  end)
+  if not ok then error("warp failed") end
+  return string.format("moved to (%.1f, %.1f, %.1f) [direct, 6s fall immunity]", pos.x, ty, pos.z)
+end
+
+-- args: mode ("fixed"/"offset"), altitude-or-offset
+COMMANDS.warp_to_pin = function(a)
+  local pos, kind = ft_icon_pos()
+  if not pos then error("no map pin or icon found - place a pin on the map first") end
+  return ft_warp(pos, kind, a[1], a[2])
+end
+
+COMMANDS.warp_to_quest = function(a)
+  local pos = ft_quest_pos()
+  if not pos then error("no active quest marker found") end
+  return ft_warp(pos, "landmark", a[1], a[2])
+end
+
+---------------------------------------------------------------- polling loop
+local last_poll, last_id = 0, nil
+
+re.on_frame(function()
+  local now = os.clock()
+  if now - last_poll < 0.1 then return end
+  last_poll = now
+  local text = rd(DIR .. "cmd.txt")
+  if not text then return end
+  text = text:gsub("[\r\n]+$", "")
+  if text:sub(-4) ~= "|END" then return end            -- file still being written
+  local parts = split(text:sub(1, -5), "|")
+  local id, cmd = parts[1], parts[2]
+  if not id or id == "" or id == last_id then return end
+  last_id = id
+  local handler = COMMANDS[cmd or ""]
+  local ok, res
+  if handler then
+    local args = {}
+    for i = 3, #parts do args[#args + 1] = parts[i] end
+    ok, res = pcall(handler, args)
+  else
+    ok, res = false, "unknown command"
+  end
+  if not ok then log.info(TAG .. tostring(cmd) .. " failed: " .. tostring(res)) end
+  wr(DIR .. "resp.txt", id .. "|" .. (ok and "OK" or "ERR") .. "|" .. tostring(res):gsub("[\r\n]+", " "))
+end)
+
+wr(DIR .. "resp.txt", "boot|OK|ddbridge ready")
+log.info(TAG .. "v1.26.0 ready (item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")
