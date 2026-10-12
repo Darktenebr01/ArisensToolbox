@@ -1,4 +1,4 @@
--- ddbridge.lua  v1.26.0  (Dragon's Dogma 2 / REFramework)
+-- ddbridge.lua  v1.37.0  (Dragon's Dogma 2 / REFramework)
 -- Command bridge for the "DD2 Bridge" Cheat Engine table.
 -- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
 -- The Cheat Engine table writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
@@ -83,8 +83,8 @@ local function load_names()
 end
 
 local function build_items()
-  local im = sdk.get_managed_singleton("app.ItemManager")
-  if not im then error("ItemManager not available (load into the game first)") end
+  local itemmgr = sdk.get_managed_singleton("app.ItemManager")
+  if not itemmgr then error("ItemManager not available (load into the game first)") end
   local names = load_names()
   local items = {}
   local function add(id, r)
@@ -95,7 +95,7 @@ local function build_items()
     end
     items[#items + 1] = { id = id, name = (name or "(unnamed)"):gsub("[\t\r\n]", " ") }
   end
-  local dict = try(function() return im:get_field("_ItemDataDict") end)
+  local dict = try(function() return itemmgr:get_field("_ItemDataDict") end)
   if dict then
     local entries = try(function() return dict:get_field("_entries") end)
     local count = try(function() return dict:get_field("_count") end) or 0
@@ -113,7 +113,7 @@ local function build_items()
     local m = find_method(sdk.find_type_definition("app.ItemManager"), "getItemData", { "System.Int32" })
     if not m then error("item table unreadable and getItemData not found") end
     for id = 0, 40000 do
-      local r = try(function() return m:call(im, id) end)
+      local r = try(function() return m:call(itemmgr, id) end)
       if type(r) == "userdata" then add(id, r) end
     end
   end
@@ -125,13 +125,13 @@ local function build_items()
 end
 
 local function give_item(id, qty, to_storage)
-  local im = sdk.get_managed_singleton("app.ItemManager")
-  if not im then error("ItemManager not available") end
+  local itemmgr = sdk.get_managed_singleton("app.ItemManager")
+  if not itemmgr then error("ItemManager not available") end
   local td = sdk.find_type_definition("app.ItemManager")
   if to_storage then
     local m = find_method(td, "forceGetItemToWarehouse", { "System.Int32", "System.Int32" })
     if not m then error("forceGetItemToWarehouse not found") end
-    m:call(im, id, qty)
+    m:call(itemmgr, id, qty)
     return "sent to storage"
   end
   local cm = sdk.get_managed_singleton("app.CharacterManager")
@@ -139,7 +139,7 @@ local function give_item(id, qty, to_storage)
   if not player then error("player not found") end
   local m = find_method(td, "getItem", { "System.Int32", "System.Int32", "app.Character" })
   if not m then error("getItem not found") end
-  m:call(im, id, qty, player)
+  m:call(itemmgr, id, qty, player)
   return "given"
 end
 
@@ -240,7 +240,7 @@ local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
 -- each command gets the argument list (strings) and returns a one-line string payload
 local COMMANDS = {}
 
-COMMANDS.ping = function() return "pong ddbridge 1.26.0" end
+COMMANDS.ping = function() return "pong ddbridge 1.37.0" end
 
 COMMANDS.list_items = function() return tostring(build_items()) end
 
@@ -306,6 +306,152 @@ COMMANDS.fill_badges = function()
     if type(cur) == "number" and quota then c.counts:set_field(f, quota) n_done = n_done + 1 end
   end
   return tostring(n_done)
+end
+
+-- Dump all fields of the first badge-data entry to find real badge names.
+COMMANDS.badge_probe = function(a)
+  local c = pawn_ctx()
+  if not c.pm then error("pawn manager not found") end
+  local bd = try(function() return c.pm:call("get_PawnBadgeData") end)
+    or try(function() return c.pm:get_field("_PawnBadgeData") end)
+  if not bd then error("PawnBadgeData not found") end
+  local list = try(function() return bd:get_field("_DataList") end)
+    or try(function() return bd:call("get_DataList") end)
+  local elems = list and elems_of(list) or {}
+  if #elems == 0 then error("badge data list empty") end
+  local e = elems[1]
+  local td = try(function() return e:get_type_definition() end)
+  local tname = td and try(function() return td:get_full_name() end) or "?"
+  local out = { "type=" .. tostring(tname), "entries=" .. tostring(#elems) }
+  if td then
+    for _, f in ipairs(try(function() return td:get_fields() end) or {}) do
+      local fn = try(function() return f:get_name() end) or "?"
+      local v = try(function() return f:get_data(e) end)
+      local vs
+      if type(v) == "string" then vs = string.format("%q", v)
+      elseif type(v) == "number" or type(v) == "boolean" then vs = tostring(v)
+      elseif v == nil then vs = "nil"
+      else
+        local mt = try(function() return v:get_type_definition() end)
+        vs = "<" .. tostring(mt and mt:get_full_name() or type(v)) .. ">"
+      end
+      if #vs > 120 then vs = vs:sub(1, 120) .. "..." end
+      out[#out + 1] = "field " .. fn .. " = " .. vs
+    end
+    for _, m in ipairs(try(function() return td:get_methods() end) or {}) do
+      local mn = try(function() return m:get_name() end) or ""
+      local l = mn:lower()
+      if l:find("name", 1, true) or l:find("message", 1, true)
+         or l:find("text", 1, true) or l:find("label", 1, true)
+         or l:find("title", 1, true) then
+        out[#out + 1] = "method " .. mn
+      end
+    end
+  end
+  -- also dump every entry's ID + count for the PB mapping
+  for i, en in ipairs(elems) do
+    local id = try(function() return en:get_field("_ID") end)
+    local co = try(function() return en:get_field("_Count") end)
+    out[#out + 1] = string.format("entry %d: _ID=%s _Count=%s",
+      i, tostring(id), tostring(co))
+    if i >= 60 then break end
+  end
+  return table.concat(out, "\n"):gsub("[\r\n]+", " | ")
+end
+
+-- Dump PawnBadgeData's own fields + hunt for badge name tables.
+COMMANDS.badge_probe2 = function(a)
+  local c = pawn_ctx()
+  if not c.pm then error("pawn manager not found") end
+  local out = {}
+  local bd = try(function() return c.pm:call("get_PawnBadgeData") end)
+    or try(function() return c.pm:get_field("_PawnBadgeData") end)
+  if not bd then error("PawnBadgeData not found") end
+  local td = try(function() return bd:get_type_definition() end)
+  out[#out + 1] = "badgedata=" .. tostring(td and td:get_full_name())
+  if td then
+    for _, f in ipairs(try(function() return td:get_fields() end) or {}) do
+      local fn = try(function() return f:get_name() end) or "?"
+      local v = try(function() return f:get_data(bd) end)
+      local vs
+      if type(v) == "string" then vs = string.format("%q", v)
+      elseif type(v) == "number" or type(v) == "boolean" then vs = tostring(v)
+      elseif v == nil then vs = "nil"
+      else
+        local mt = try(function() return v:get_type_definition() end)
+        local mn = tostring(mt and mt:get_full_name() or type(v))
+        -- peek into list-like values: count + first element type
+        local cnt = try(function() return v:get_Count() end)
+          or try(function() return #elems_of(v) end)
+        vs = "<" .. mn .. (cnt and (" count=" .. tostring(cnt)) or "") .. ">"
+      end
+      if #vs > 160 then vs = vs:sub(1, 160) .. "..." end
+      out[#out + 1] = "field " .. fn .. " = " .. vs
+    end
+  end
+  -- hunt for other Badge-related types that might hold names
+  local cands = { "app.PawnBadgeDefine", "app.PawnBadgeData.BadgeData",
+    "app.PawnDefine", "app.BadgeDefine", "app.PawnBadgeManager" }
+  for _, tn in ipairs(cands) do
+    local t2 = try(function() return sdk.find_type_definition(tn) end)
+    if t2 then
+      local fns = {}
+      for _, f in ipairs(try(function() return t2:get_fields() end) or {}) do
+        fns[#fns + 1] = try(function() return f:get_name() end) or "?"
+        if #fns >= 25 then break end
+      end
+      out[#out + 1] = "type " .. tn .. " fields: " .. table.concat(fns, ",")
+    else
+      out[#out + 1] = "type " .. tn .. " NOT FOUND"
+    end
+  end
+  return table.concat(out, " | ")
+end
+
+-- Dump app.PawnDefine.BadgeIDEnums entries and their fields.
+COMMANDS.badge_probe3 = function(a)
+  local out = {}
+  local pd = try(function() return sdk.find_type_definition("app.PawnDefine") end)
+  if not pd then error("app.PawnDefine not found") end
+  -- BadgeIDEnums may be static; try both static and instance access
+  local benums = try(function() return pd:get_field("BadgeIDEnums"):get_data(nil) end)
+    or try(function()
+      local f = pd:get_field("BadgeIDEnums")
+      return f:get_data(nil)
+    end)
+  if benums == nil then
+    -- try via a managed singleton or default object if any
+    out[#out + 1] = "BadgeIDEnums static read = nil, trying harder..."
+    local m = try(function() return pd:get_method("get_BadgeIDEnums") end)
+    if m then out[#out + 1] = "get_BadgeIDEnums method exists" end
+  end
+  local bt = benums ~= nil and try(function() return benums:get_type_definition() end)
+  out[#out + 1] = "BadgeIDEnums type=" .. tostring(bt and bt:get_full_name())
+  local elems = benums ~= nil and elems_of(benums) or {}
+  out[#out + 1] = "count=" .. tostring(#elems)
+  for i, e in ipairs(elems) do
+    local et = try(function() return e:get_type_definition() end)
+    local parts = { "entry " .. i .. " type=" .. tostring(et and et:get_full_name()) }
+    if et then
+      for _, f in ipairs(try(function() return et:get_fields() end) or {}) do
+        local fn = try(function() return f:get_name() end) or "?"
+        local v = try(function() return f:get_data(e) end)
+        local vs
+        if type(v) == "string" then vs = string.format("%q", v)
+        elseif type(v) == "number" or type(v) == "boolean" then vs = tostring(v)
+        elseif v == nil then vs = "nil"
+        else vs = "<" .. tostring(try(function()
+          return v:get_type_definition():get_full_name() end) or type(v)) .. ">"
+        end
+        if #vs > 100 then vs = vs:sub(1, 100) .. "..." end
+        parts[#parts + 1] = fn .. "=" .. vs
+        if #parts > 12 then parts[#parts + 1] = "..."; break end
+      end
+    end
+    out[#out + 1] = table.concat(parts, " ")
+    if i >= 40 then out[#out + 1] = "... (truncated)"; break end
+  end
+  return table.concat(out, " | ")
 end
 
 COMMANDS.grant_badge = function(a)
@@ -577,6 +723,286 @@ local function get_target(kind)
     pdata = try(function() return h:call("get_PawnDataContext") end),
     mdata = kind ~= "player" and try(function() return src:call("get_MainPawnDataContext") end) or nil,
   }
+end
+
+---------------------------------------------------------------- v1.36 name editing
+-- Name contexts: chara:get_Context().Contexts[RuntimeType]:get_CurrentContext().
+-- Arisen -> app.PlayerPersonalDataContext, getter get_NameProp.
+-- Pawns  -> app.PawnDataContext, getter get_Name.
+-- A renamed name only shows in-game when stamped with the current game
+-- language (setLanguageOnEdit / LanguageOnEdit fields). Renames live in
+-- memory until the game is saved and reloaded.
+
+local function name_context_of(chara, type_name)
+  if type(chara) ~= "userdata" then return nil end
+  local holder = try(function() return chara:call("get_Context") end)
+  if type(holder) ~= "userdata" then return nil end
+  local info = try(function()
+    local td = sdk.find_type_definition(type_name)
+    return holder.Contexts[td:get_runtime_type()]
+  end)
+  if type(info) ~= "userdata" then
+    info = try(function()
+      local td = sdk.find_type_definition(type_name)
+      return holder:call("get_Contexts"):call("get_Item", td:get_runtime_type())
+    end)
+  end
+  if type(info) ~= "userdata" then return nil end
+  return try(function() return info:call("get_CurrentContext") end)
+end
+
+local function arisen_name_ctx()
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+  return name_context_of(player, "app.PlayerPersonalDataContext")
+end
+
+local function pawn_name_ctx(chara, human)
+  local ctx = name_context_of(chara, "app.PawnDataContext")
+  if type(ctx) == "userdata" then return ctx end
+  -- Fallback: the Human's PawnDataContext (probe-proven 2026-10-12).
+  ctx = human and try(function() return human:call("get_PawnDataContext") end)
+  if type(ctx) == "userdata" then return ctx end
+  return try(function() return chara:call("get_PawnDataContext") end)
+end
+
+-- All non-static fields of a type and its parents.
+local function all_fields(td)
+  local list = {}
+  while td do
+    for _, f in ipairs(try(function() return td:get_fields() end) or {}) do
+      if not try(function() return f:is_static() end) then list[#list + 1] = f end
+    end
+    td = try(function() return td:get_parent_type() end)
+  end
+  return list
+end
+
+local function call_set(ctx, method, value)
+  local td = try(function() return ctx:get_type_definition() end)
+  if not (td and try(function() return td:get_method(method) end)) then return false end
+  if try(function() ctx:call(method, value) return true end) then return true end
+  return try(function() ctx:call(method, sdk.create_managed_string(value)) return true end) or false
+end
+
+local function language_of(ctx)
+  for _, m in ipairs({ "get_LanguageOnEditProp", "get_LanguageOnEdit" }) do
+    local v = try(function() return ctx:call(m) end)
+    if v ~= nil then return v end
+  end
+  for _, n in ipairs({ "LanguageOnEdit", "_LanguageOnEdit" }) do
+    local v = try(function() return ctx:get_field(n) end)
+    if v ~= nil then return v end
+  end
+  return nil
+end
+
+local function stamp_language(ctx, value)
+  if value == nil then return end
+  call_set(ctx, "setLanguageOnEdit", value)
+  for _, n in ipairs({ "LanguageOnEdit", "_LanguageOnEdit" }) do
+    try(function()
+      if ctx:get_field(n) ~= nil then ctx:set_field(n, value) end
+    end)
+  end
+end
+
+-- Clean a name the way the game expects: max 12 chars, no < > or controls.
+local function clean_name(s)
+  s = tostring(s or "")
+  local out, n = {}, 0
+  for _, cp in utf8.codes(s) do
+    if n >= 12 then break end
+    if cp >= 32 and cp ~= 127 and cp ~= 60 and cp ~= 62 then
+      out[#out + 1] = utf8.char(cp)
+      n = n + 1
+    end
+  end
+  return table.concat(out)
+end
+
+-- Rename through a name context. Returns the applied name.
+local function rename_on_ctx(ctx, getter, name)
+  if type(ctx) ~= "userdata" then error("name context not found (load into a save first)") end
+  name = clean_name(name)
+  if name == "" then error("name is empty") end
+  local old = try(function() return ctx:call(getter) end)
+  local lang = language_of(ctx)
+  call_set(ctx, "setName", name)
+  if type(old) == "string" and old ~= "" and old ~= name then
+    local td = try(function() return ctx:get_type_definition() end)
+    for _, f in ipairs(all_fields(td)) do
+      local fn = try(function() return f:get_name() end) or ""
+      if not fn:lower():find("nick", 1, true) then
+        local v = try(function() return f:get_data(ctx) end)
+        if v == old then try(function() ctx:set_field(fn, name) end) end
+      end
+    end
+  end
+  stamp_language(ctx, lang)
+  return name
+end
+
+local function check_name(a, npos)
+  local name = a[npos] or ""
+  if name:match("^%s*$") then error("name is empty") end
+  return name
+end
+
+COMMANDS.get_arisen_name = function()
+  local ctx = arisen_name_ctx()
+  local n = ctx and try(function() return ctx:call("get_NameProp") end)
+  return clean(type(n) == "string" and n ~= "" and n or "?")
+end
+
+COMMANDS.set_arisen_name = function(a)
+  local applied = rename_on_ctx(arisen_name_ctx(), "get_NameProp", check_name(a, 1))
+  return 'Arisen renamed to "' .. applied .. '" (save + reload the game to keep it)'
+end
+
+COMMANDS.get_main_pawn_name = function()
+  local pm = sdk.get_managed_singleton("app.PawnManager")
+  if not pm then error("PawnManager not found (load into a save first)") end
+  local mp = try(function() return pm:call("get_MainPawn") end)
+  if not mp then error("main pawn not found") end
+  local h = try(function() return human_from(mp) end) or try(function() return find_human(mp) end)
+  local ctx = pawn_name_ctx(mp, h)
+  local n = ctx and try(function() return ctx:call("get_Name") end)
+  return clean(type(n) == "string" and n ~= "" and n or "?")
+end
+
+-- args: idx (0 = main pawn, else index into the last list_pawns result), name
+COMMANDS.set_pawn_name = function(a)
+  local idx = int(a[1])
+  local name = check_name(a, 2)
+  local chara, human
+  if idx == 0 then
+    local pm = sdk.get_managed_singleton("app.PawnManager")
+    if not pm then error("PawnManager not found (load into a save first)") end
+    chara = try(function() return pm:call("get_MainPawn") end)
+    if not chara then error("main pawn not found") end
+    human = try(function() return human_from(chara) end)
+      or try(function() return find_human(chara) end)
+  else
+    local e = PW.list[idx]
+    if not e then error("pawn not in the list - refresh the pawn list") end
+    chara, human = e.src, e.human
+  end
+  local applied = rename_on_ctx(pawn_name_ctx(chara, human), "get_Name", name)
+  return 'Pawn renamed to "' .. applied .. '" (save + reload the game to keep it)'
+end
+
+---------------------------------------------------------------- v1.34 name probe
+-- Summarize name-ish accessors on one object into `out`.
+local function probe_name_on(obj, label, out)
+  if type(obj) ~= "userdata" then out[#out + 1] = label .. ": <nil>"; return end
+  local td = try(function() return obj:get_type_definition() end)
+  if not td then out[#out + 1] = label .. ": <no typedef>"; return end
+  local tname = try(function() return td:get_full_name() end) or "?"
+  local parts = {}
+  local methods = try(function() return td:get_methods() end) or {}
+  for _, m in ipairs(methods) do
+    local mn = try(function() return m:get_name() end) or ""
+    if mn:lower():find("name", 1, true) then
+      local info = mn
+      if mn:lower():match("^get_") then
+        local ok, v = pcall(function() return obj:call(mn) end)
+        if ok then
+          if type(v) == "string" then info = mn .. '="' .. v:sub(1, 40) .. '"'
+          else info = mn .. "->" .. type(v) end
+        else info = mn .. "->ERR" end
+      end
+      parts[#parts + 1] = "m:" .. info
+    end
+  end
+  local fields = try(function() return td:get_fields() end) or {}
+  for _, f in ipairs(fields) do
+    local fn = try(function() return f:get_name() end) or ""
+    if fn:lower():find("name", 1, true) then
+      local v = try(function() return obj:get_field(fn) end)
+      local vs = (v == nil) and "<nil>" or tostring(v):sub(1, 40)
+      parts[#parts + 1] = "f:" .. fn .. "=" .. vs
+    end
+  end
+  out[#out + 1] = label .. "(" .. tname .. "): " ..
+    (#parts > 0 and table.concat(parts, ", ") or "<no name-ish members>")
+end
+
+-- args: which ("arisen" or "main"). Reports where display names live.
+COMMANDS.probe_name = function(a)
+  local which = a[1] or "arisen"
+  local char
+  if which == "main" then
+    local pm = sdk.get_managed_singleton("app.PawnManager")
+    if not pm then error("PawnManager not found (load into a save first)") end
+    char = try(function() return pm:call("get_MainPawn") end)
+    if not char then error("main pawn not found") end
+  else
+    local cm = sdk.get_managed_singleton("app.CharacterManager")
+    if not cm then error("CharacterManager not found (load into the game first)") end
+    for _, g in ipairs({ "get_ManualPlayer", "getManualPlayer", "get_ManualPlayerNoCheck" }) do
+      char = try(function() return cm:call(g) end)
+      if char then break end
+    end
+    if not char then error("player not found") end
+  end
+  local human = try(function() return human_from(char) end)
+    or try(function() return find_human(char) end)
+  local out = {}
+  probe_name_on(char, "char", out)
+  probe_name_on(human, "human", out)
+  probe_name_on(human and try(function() return human:call("get_PawnDataContext") end),
+    "human_pdata", out)
+  probe_name_on(try(function() return char:call("get_PawnDataContext") end),
+    "char_pdata", out)
+  if which == "main" then
+    probe_name_on(try(function() return char:call("get_MainPawnDataContext") end),
+      "main_pdata", out)
+  end
+  return (table.concat(out, " // "):gsub("[|;\r\n\t]", " "))
+end
+
+---------------------------------------------------------------- v1.35 arisen name hunt
+-- The Arisen's name container has no 'name' in its accessor names, so the
+-- v1.34 probe couldn't see it. This enumerates data/player/context/profile
+-- getters on CharacterManager, the Arisen char and human, then name-probes
+-- whatever objects they return.
+COMMANDS.probe_arisen = function()
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  if not cm then error("CharacterManager not found (load into the game first)") end
+  local char
+  for _, g in ipairs({ "get_ManualPlayer", "getManualPlayer", "get_ManualPlayerNoCheck" }) do
+    char = try(function() return cm:call(g) end)
+    if char then break end
+  end
+  if not char then error("player not found") end
+  local human = try(function() return human_from(char) end)
+    or try(function() return find_human(char) end)
+  local out = {}
+  local function children(obj, label)
+    if type(obj) ~= "userdata" then return end
+    local td = try(function() return obj:get_type_definition() end)
+    if not td then return end
+    local methods = try(function() return td:get_methods() end) or {}
+    for _, m in ipairs(methods) do
+      local mn = try(function() return m:get_name() end) or ""
+      local ml = mn:lower()
+      if ml:match("^get_") and (ml:find("data", 1, true) or ml:find("player", 1, true)
+          or ml:find("context", 1, true) or ml:find("profile", 1, true)) then
+        local ok, v = pcall(function() return obj:call(mn) end)
+        if ok and type(v) == "userdata" then
+          probe_name_on(v, label .. "." .. mn, out)
+        elseif ok and type(v) == "string" and v ~= "" then
+          out[#out + 1] = label .. "." .. mn .. '="' .. v:sub(1, 40) .. '"'
+        end
+      end
+    end
+  end
+  children(cm, "charman")
+  children(char, "char")
+  children(human, "human")
+  if #out == 0 then out[#out + 1] = "<no data/player/context getters found>" end
+  return (table.concat(out, " // "):gsub("[|;\r\n\t]", " "))
 end
 
 ---------------------------------------------------------------- v1.1 enums
@@ -3062,6 +3488,113 @@ COMMANDS.jump_reset = function()
   return "reset to game values (" .. tostring(JUMP.orig_height) .. ")"
 end
 
+---------------------------------------------------------------- v1.31 movement speed
+-- Movement x% via HumanMoveSpeedCalculator hook; ladder via FullBodyLayer speed.
+local MOVE = { rate = 100, pawns = true, ladder = 100,
+               addrs = {}, layer = nil, refresh_at = 0, hooked = false }
+
+local function move_refresh()
+  local set = {}
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  local pl = cm and try(function() return cm:call("get_ManualPlayer") end)
+  if pl then local a = try(function() return pl:get_address() end) if a then set[a] = true end end
+  if MOVE.pawns then
+    local pm = sdk.get_managed_singleton("app.PawnManager")
+    local list = pm and try(function() return pm:call("getAllPartyPawn") end)
+    for _, pw in ipairs(coll_elems(list)) do
+      local ch = try(function() return pw:call("get_CachedCharacter") end)
+      if ch then local a = try(function() return ch:get_address() end) if a then set[a] = true end end
+    end
+  end
+  MOVE.addrs = set
+end
+
+-- install once at load; the pre-hook is a single comparison while rate == 100
+do
+  local mst = sdk.find_type_definition("app.HumanMoveSpeedCalculator")
+  local m = mst and try(function()
+    return mst:get_method("calcMoveFrameSpeedImpl(app.HumanSpeedParameter.ActionTypeEnum)")
+  end)
+  if m then
+    pcall(function()
+      sdk.hook(m,
+        function(args)
+          local st = thread.get_hook_storage()
+          st.mv = nil
+          local rate = MOVE.rate
+          if rate == 100 then return end
+          local at = sdk.to_int64(args[3]) & 0xFFFFFFFF
+          if not (at == 0 or at == 1 or (at >= 6 and at <= 16)) then return end
+          local calc = sdk.to_managed_object(args[2])
+          local chara = calc and try(function() return calc:get_field("Chara") end)
+          local addr = chara and try(function() return chara:get_address() end)
+          if addr and MOVE.addrs[addr] then st.mv = rate end
+        end,
+        function(retval)
+          local st = thread.get_hook_storage()
+          local rate = st.mv
+          st.mv = nil
+          if not rate then return retval end
+          return sdk.float_to_ptr(sdk.to_float(retval) * rate / 100)
+        end)
+      MOVE.hooked = true
+    end)
+  end
+  if not MOVE.hooked then log.info(TAG .. "movespeed: hook not installed (method not found)") end
+end
+
+re.on_frame(function()
+  local active = MOVE.rate ~= 100 or MOVE.ladder ~= 100
+  if active then
+    local now = os.clock()
+    if now - MOVE.refresh_at > 5 then
+      MOVE.refresh_at = now
+      pcall(move_refresh)
+    end
+  end
+  local want = nil
+  if MOVE.ladder ~= 100 then
+    local cm = sdk.get_managed_singleton("app.CharacterManager")
+    local pl = cm and try(function() return cm:call("get_ManualPlayer") end)
+    local node = pl and try(function()
+      local mgr = pl:get_field("<ActionManager>k__BackingField")
+      local fsm = mgr and mgr:get_field("Fsm")
+      local s = fsm and fsm:call("getCurrentNodeName(System.UInt32)", 0)
+      return type(s) == "string" and s or nil
+    end)
+    if node and node:sub(1, 22) == "Locomotion.ClimbLadder" then
+      want = MOVE.ladder / 100
+    end
+  end
+  if want then
+    if not MOVE.layer then
+      local cm = sdk.get_managed_singleton("app.CharacterManager")
+      local pl = cm and try(function() return cm:call("get_ManualPlayer") end)
+      MOVE.layer = pl and try(function() return pl:get_field("FullBodyLayer") end)
+    end
+    if MOVE.layer then pcall(function() MOVE.layer:call("set_Speed(System.Single)", want) end) end
+  elseif MOVE.layer then
+    pcall(function() MOVE.layer:call("set_Speed(System.Single)", 1.0) end)
+    MOVE.layer = nil
+  end
+end)
+
+-- args: rate percent (100 = off), pawns 0/1, ladder percent (100 = off)
+COMMANDS.movespeed_set = function(a)
+  MOVE.rate = math.max(100, math.min(300, tonumber(a[1]) or 100))
+  MOVE.pawns = (a[2] ~= "0")
+  MOVE.ladder = math.max(100, math.min(300, tonumber(a[3]) or 100))
+  pcall(move_refresh)
+  MOVE.refresh_at = os.clock()
+  return string.format("movement %d%% (pawns %s), ladder %d%%",
+    MOVE.rate, MOVE.pawns and "on" or "off", MOVE.ladder)
+end
+
+COMMANDS.movespeed_get = function()
+  return string.format("%d|%d|%d|%s",
+    MOVE.rate, MOVE.pawns and 1 or 0, MOVE.ladder, MOVE.hooked and "hooked" or "nohook")
+end
+
 COMMANDS.jump_probe = function()
   local lines = {}
   local function L(x) lines[#lines + 1] = x end
@@ -3399,4 +3932,4 @@ re.on_frame(function()
 end)
 
 wr(DIR .. "resp.txt", "boot|OK|ddbridge ready")
-log.info(TAG .. "v1.26.0 ready (item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")
+log.info(TAG .. "v1.37.0 ready (item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")

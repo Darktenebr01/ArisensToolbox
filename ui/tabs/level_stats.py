@@ -116,7 +116,8 @@ class LevelStatsTab(ctk.CTkFrame):
             self.after(0, lambda: self.app.set_status(
                 f"Vocation {job_s}, level {lvl_s}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def apply_level_async(self):
         client = require_client(self.app)
@@ -156,7 +157,8 @@ class LevelStatsTab(ctk.CTkFrame):
                 self.app.set_status("Favorability read."),
             ))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def apply_fav_async(self):
         client = require_client(self.app)
@@ -190,7 +192,8 @@ class LevelStatsTab(ctk.CTkFrame):
                     rows.append((int(gi), title, field, label, value))
             self.after(0, lambda: self._apply_stats(rows, quiet))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _apply_stats(self, rows, quiet):
         keep = self.clist.curselection()
@@ -227,7 +230,8 @@ class LevelStatsTab(ctk.CTkFrame):
             self.after(0, lambda: self.app.set_status(
                 "Set and locked." if lock_s == "1" else "Set."))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self._do_read_stats(client, tgt, quiet=True)
 
     def clear_locks_async(self):
@@ -246,7 +250,8 @@ class LevelStatsTab(ctk.CTkFrame):
             msg = after_msg(res) if after_msg else (ok_msg or res)
             self.after(0, lambda: self.app.set_status(msg))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def refresh_all(self):
         self.read_level_async()

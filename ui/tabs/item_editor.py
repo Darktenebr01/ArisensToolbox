@@ -215,7 +215,8 @@ class ItemEditorTab(ctk.CTkFrame):
                     self.app.set_status("No inventory found - load a save.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _current_owner_idx(self):
         if self.owner_idxs and 0 <= self._owner_pos < len(self.owner_idxs):
@@ -276,7 +277,8 @@ class ItemEditorTab(ctk.CTkFrame):
                     after()
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def refresh_list(self):
         tokens = self.search_var.get().lower().split()
@@ -341,7 +343,8 @@ class ItemEditorTab(ctk.CTkFrame):
                     + ("  (equipped - press APPLY to game after changes)" if equipped else ""))
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- skill slots --------------------------------------------------
 
@@ -405,7 +408,8 @@ class ItemEditorTab(ctk.CTkFrame):
                                               self.app.set_status(msg)))
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def clear_slots(self):
         if not self.sel_row:
@@ -427,7 +431,8 @@ class ItemEditorTab(ctk.CTkFrame):
                                               self.app.set_status(msg)))
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def apply_to_game(self):
         if not self.sel_row:
@@ -444,7 +449,8 @@ class ItemEditorTab(ctk.CTkFrame):
             res = client.send("item_apply", row, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Applied: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- appraisal ----------------------------------------------------
 
@@ -469,7 +475,8 @@ class ItemEditorTab(ctk.CTkFrame):
             res = client.send("item_set_appraisal", row, *vals, appr, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Applied: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- valid-skill filter -------------------------------------------
 
@@ -530,4 +537,5 @@ class ItemEditorTab(ctk.CTkFrame):
             self.after(0, lambda: (show_probe(self, title, text),
                                    self.app.set_status(f"Probe done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))

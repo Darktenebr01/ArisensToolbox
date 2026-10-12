@@ -6,7 +6,7 @@ from bridge.protocol import BridgeError, BridgeTimeout
 from ui import theme as T
 from ui.widgets import (
     Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton,
-    Field, StyledListbox, run_async, require_client,
+    Field, StyledListbox, run_async, require_client, show_probe,
 )
 
 
@@ -67,6 +67,10 @@ class PawnTab(ctk.CTkFrame):
         brow2.grid(row=3, column=0, sticky="w")
         GhostButton(brow2, text="Grant selected badge", width=170,
                     command=self.grant_badge_async).pack(side="left")
+        GhostButton(brow2, text="Probe badge data", width=150,
+                    command=self.probe_badges_async).pack(side="left", padx=8)
+        GhostButton(brow2, text="Probe badge names", width=160,
+                    command=self.probe_badge_names_async).pack(side="left")
 
     # -- refresh (called by the app after pawn picker changes) ----------
 
@@ -94,7 +98,8 @@ class PawnTab(ctk.CTkFrame):
                 self.good_var.set(g), self.like_var.set(l),
                 self.app.set_status("Rating read.")))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def apply_rating_async(self):
         client = require_client(self.app)
@@ -112,15 +117,58 @@ class PawnTab(ctk.CTkFrame):
             client.send("set_rating", g, l)
             self.after(0, lambda: self.app.set_status("Rating applied."))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- badges ----------------------------------------------------------
+
+    # Confirmed in-game badge names (PB number -> name). Only add mappings
+    # proven by the darken test or certain by quota; never guess.
+    # 2026-10-11: user darken-tested PB020/021/025/026/027/040/041; the rest
+    # deduced from screenshot grid order (grid slot n = PB(n+16)) + quota match.
+    BADGE_NAMES = {
+        20: "Cyclops Clobberer",
+        21: "Ogre Eliminator",
+        22: "Grim Ogre Obliterator",
+        23: "Golem Toppler",
+        24: "Griffin Grounder",
+        25: "Sphinx Smiter",
+        26: "Chimera Killer",
+        27: "Gorechimera",            # full in-game name TBC
+        28: "Medusa Maimer",
+        29: "Minotaur Mauler",
+        30: "Goreminotaur Mangler",
+        31: "Drake Destroyer",
+        32: "Lesser Dragon Devastator",
+        33: "Garm Gutter",
+        34: "Warg Waster",
+        36: "Vernworthian Gallivanter",
+        37: "Battahli Trailblazer",
+        38: "Norgan Navigator",
+        40: "Evil Eye Eviscerator",
+        41: "Norgan Giant Annihilator",
+        42: "Blemmyae Butcherer",
+        43: "Fimbl Flayer",
+        50: "Death Reaper",
+    }
 
     def read_badges_async(self):
         client = require_client(self.app)
         if not client:
             return
         run_async(self, lambda: self._read_badges(client))
+
+    @staticmethod
+    def _badge_kind(quota):
+        """Describe a badge by its quota (the one thing the game tells us)."""
+        return {
+            "50": "Camp badge (camp 50x)",
+            "30": "Slayer badge (30 kills)",
+            "20": "Slayer badge (20 kills)",
+            "10": "Slayer badge (10 kills)",
+            "5": "Slayer badge (5 kills)",
+            "1": "Badge (count 1)",
+        }.get(quota.strip(), "Badge")
 
     def _read_badges(self, client):
         try:
@@ -130,9 +178,11 @@ class PawnTab(ctk.CTkFrame):
                 # n,cur,quota,name  (name is cleaned: no commas)
                 parts = row.split(",", 3)
                 if len(parts) == 4 and parts[0].strip().isdigit():
-                    n, cur, quota, name = (p.strip() for p in parts)
+                    n, cur, quota, _name = (p.strip() for p in parts)
                     badges.append((int(n), int(cur)))
-                    labels.append(f"PB{int(n):03d}  {name}   {cur} / {quota}")
+                    shown = self.BADGE_NAMES.get(int(n), self._badge_kind(quota))
+                    labels.append(
+                        f"PB{int(n):03d}  {shown}   {cur} / {quota}")
             self.badges = badges
             def _ui():
                 self.badge_list.delete(0, tk.END)
@@ -141,7 +191,8 @@ class PawnTab(ctk.CTkFrame):
                 self.app.set_status(f"Read {len(badges)} badges.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _selected_badge(self):
         sel = self.badge_list.curselection()
@@ -171,7 +222,8 @@ class PawnTab(ctk.CTkFrame):
                 self.app.set_status(f"PB{n:03d} = {v}"),
                 self.read_badges_async()))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def fill_badges_async(self):
         client = require_client(self.app)
@@ -186,7 +238,8 @@ class PawnTab(ctk.CTkFrame):
                 self.app.set_status(f"Filled {res} badges."),
                 self.read_badges_async()))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def grant_badge_async(self):
         b = self._selected_badge()
@@ -204,4 +257,37 @@ class PawnTab(ctk.CTkFrame):
             client.send("grant_badge", n)
             self.after(0, lambda: self.app.set_status(f"Granted PB{n}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def probe_badges_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._probe_badges(client))
+
+    def probe_badge_names_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._probe_badge_names(client))
+
+    def _probe_badge_names(self, client):
+        try:
+            res = client.send("badge_probe3", timeout=30)
+            self.after(0, lambda: (
+                self.app.set_status("Badge name probe done - full output in the popup."),
+                show_probe(self, "Badge name probe - copy all of it", res)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def _probe_badges(self, client):
+        try:
+            res = client.send("badge_probe", timeout=30)
+            self.after(0, lambda: (
+                self.app.set_status("Badge probe done - full output in the popup."),
+                show_probe(self, "Badge probe - copy all of it", res)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))

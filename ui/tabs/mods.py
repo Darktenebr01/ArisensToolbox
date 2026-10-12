@@ -1,4 +1,4 @@
-"""Mods tab: jump tweaks, fast travel, faster enemy respawn (player)."""
+"""Mods tab: jump tweaks, fast travel, faster enemy respawn, movement speed (player)."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
@@ -36,6 +36,7 @@ class ModsTab(ctk.CTkFrame):
         self._build_jump(body, row=0)
         self._build_fast_travel(body, row=2)
         self._build_respawn(body, row=4)
+        self._build_movement(body, row=6)
 
     # -- jump section ----------------------------------------------------
 
@@ -126,7 +127,8 @@ class ModsTab(ctk.CTkFrame):
             self.after(0, lambda: (self.app.set_status(f"Jump: {res}"),
                                    self.info_var.set(res)))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def read_async(self):
         client = require_client(self.app)
@@ -158,7 +160,8 @@ class ModsTab(ctk.CTkFrame):
                 self.app.set_status(f"Read: height {cur} (game default {o})")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout, ValueError) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def reset_async(self):
         client = require_client(self.app)
@@ -181,7 +184,8 @@ class ModsTab(ctk.CTkFrame):
                 self.app.set_status(res)
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def probe_async(self):
         client = require_client(self.app)
@@ -197,7 +201,8 @@ class ModsTab(ctk.CTkFrame):
                 self.app.set_status(f"Jump dump: {res} lines."),
                 show_probe(self, "Jump / fall dump - copy all of it", text)))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- fast travel section ----------------------------------------------
 
@@ -259,7 +264,8 @@ class ModsTab(ctk.CTkFrame):
             self.after(0, lambda: (self.app.set_status(res),
                                    self.warp_var.set(res)))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- faster respawn section --------------------------------------------
 
@@ -322,7 +328,8 @@ class ModsTab(ctk.CTkFrame):
             self.after(0, lambda: (self.app.set_status(res),
                                    self.respawn_var.set(res)))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def respawn_read_async(self):
         client = require_client(self.app)
@@ -339,10 +346,13 @@ class ModsTab(ctk.CTkFrame):
     def _do_respawn_clear(self, client):
         try:
             res = client.send("respawn_clear", timeout=30)
-            self.after(0, lambda: (self.app.set_status(res),
-                                   self.respawn_var.set(res)))
+            self.after(0, lambda: (
+                self.app.set_status("Fast-forward done - full output in the popup."),
+                self.respawn_var.set("Full output in the popup."),
+                show_probe(self, "Fast Forward 3 Days - copy all of it", res)))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def respawn_reset_async(self):
         client = require_client(self.app)
@@ -366,7 +376,8 @@ class ModsTab(ctk.CTkFrame):
             else:
                 self.after(0, lambda: self.app.set_status(f"Error: unexpected response: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def respawn_defaults_async(self):
         client = require_client(self.app)
@@ -389,7 +400,8 @@ class ModsTab(ctk.CTkFrame):
             else:
                 self.after(0, lambda: self.app.set_status(f"Error: unexpected response: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _do_respawn_read(self, client):
         try:
@@ -405,4 +417,117 @@ class ModsTab(ctk.CTkFrame):
             else:
                 self.after(0, lambda: self.app.set_status(f"Error: unexpected response: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    # -- movement speed section ------------------------------------------
+
+    def _build_movement(self, body, row):
+        H2(body, "Movement Speed", row=row, column=0, sticky="w", pady=(6, 0))
+        card = Card(body, row=row + 1, column=0, sticky="ew", padx=4, pady=6)
+        cc = card_content(card)
+
+        Muted(cc, "Walk, run and sprint faster — for you and optionally your pawns. "
+                  "100% = game default.",
+              row=0, column=0, sticky="w", pady=(0, 8))
+
+        self.mv_label_var = ctk.StringVar(value="Movement speed: 100%")
+        ctk.CTkLabel(cc, textvariable=self.mv_label_var,
+                     font=(T.FONT_FAMILY, 13, "bold"),
+                     text_color=T.TEXT).grid(row=1, column=0, sticky="w")
+        self.mv_slider = ctk.CTkSlider(
+            cc, from_=100, to=300, number_of_steps=200,
+            width=700, command=self._on_mv_change,
+            fg_color=T.SURFACE2, progress_color=T.ACCENT,
+            button_color=T.ACCENT, button_hover_color=T.ACCENT_HOVER)
+        self.mv_slider.grid(row=2, column=0, sticky="w", pady=(4, 8))
+        self.mv_slider.set(100)
+
+        self.mv_pawns_var = ctk.BooleanVar(value=True)
+        Check(cc, text="Apply to pawns too", variable=self.mv_pawns_var,
+              command=self._on_mv_toggle).grid(row=3, column=0, sticky="w", pady=(0, 8))
+
+        self.ld_label_var = ctk.StringVar(value="Ladder climbing speed: 100%")
+        ctk.CTkLabel(cc, textvariable=self.ld_label_var,
+                     font=(T.FONT_FAMILY, 13, "bold"),
+                     text_color=T.TEXT).grid(row=4, column=0, sticky="w")
+        self.ld_slider = ctk.CTkSlider(
+            cc, from_=100, to=300, number_of_steps=200,
+            width=700, command=self._on_ld_change,
+            fg_color=T.SURFACE2, progress_color=T.ACCENT,
+            button_color=T.ACCENT, button_hover_color=T.ACCENT_HOVER)
+        self.ld_slider.grid(row=5, column=0, sticky="w", pady=(4, 16))
+        self.ld_slider.set(100)
+
+        brow = ctk.CTkFrame(cc, fg_color="transparent")
+        brow.grid(row=6, column=0, sticky="w")
+        PrimaryButton(brow, text="Apply", width=120,
+                      command=self.movespeed_apply_async).pack(side="left", padx=(0, 8))
+        GhostButton(brow, text="Read current", width=140,
+                    command=self.movespeed_read_async).pack(side="left", padx=8)
+
+        self.mv_info_var = ctk.StringVar(value="")
+        ctk.CTkLabel(cc, textvariable=self.mv_info_var,
+                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
+            row=7, column=0, sticky="w", pady=(8, 0))
+        self._update_mv_labels()
+
+    def _update_mv_labels(self):
+        self.mv_label_var.set(f"Movement speed: {int(self.mv_slider.get())}%")
+        self.ld_label_var.set(f"Ladder climbing speed: {int(self.ld_slider.get())}%")
+
+    def _on_mv_change(self, _value):
+        self._update_mv_labels()
+
+    def _on_ld_change(self, _value):
+        self._update_mv_labels()
+
+    def _on_mv_toggle(self):
+        pass  # applied together with the sliders via Apply
+
+    def movespeed_apply_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        rate = str(int(self.mv_slider.get()))
+        pawns = "1" if self.mv_pawns_var.get() else "0"
+        ladder = str(int(self.ld_slider.get()))
+        run_async(self, lambda: self._do_movespeed_apply(client, rate, pawns, ladder))
+
+    def _do_movespeed_apply(self, client, rate, pawns, ladder):
+        try:
+            res = client.send("movespeed_set", rate, pawns, ladder, timeout=15)
+            self.after(0, lambda: (self.app.set_status(f"Movement: {res}"),
+                                   self.mv_info_var.set(res)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def movespeed_read_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._do_movespeed_read(client))
+
+    def _do_movespeed_read(self, client):
+        try:
+            res = client.send("movespeed_get", timeout=10)
+            parts = (res or "").split("|")
+            if len(parts) == 4:
+                rate, pawns, ladder, hook = (p.strip() for p in parts)
+
+                def _ui():
+                    self.mv_slider.set(_clamp(int(float(rate)), 100, 300))
+                    self.ld_slider.set(_clamp(int(float(ladder)), 100, 300))
+                    self.mv_pawns_var.set(pawns == "1")
+                    self._update_mv_labels()
+                    state = f"Movement {rate}%, pawns {'on' if pawns == '1' else 'off'}, " \
+                            f"ladder {ladder}% ({hook})"
+                    self.mv_info_var.set(state)
+                    self.app.set_status("Movement speed read.")
+                self.after(0, _ui)
+            else:
+                self.after(0, lambda: self.app.set_status(f"Error: unexpected response: {res}"))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))

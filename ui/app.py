@@ -10,6 +10,7 @@ from ui.tabs.item_editor import ItemEditorTab
 from ui.tabs.item_stats import ItemStatsTab
 from ui.tabs.duplicate_items import DuplicateItemsTab
 from ui.tabs.pawn import PawnTab
+from ui.tabs.names import NamesTab
 from ui.tabs.weapon_skills import WeaponSkillsTab
 from ui.tabs.upgraded_skills import UpgradedSkillsTab
 from ui.tabs.core_augments import CoreAugmentsTab
@@ -23,7 +24,7 @@ from ui import theme as T
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-CLIENT_VERSION = "0.19"
+CLIENT_VERSION = "0.37"
 
 # Tabs hidden from the sidebar in normal use (still importable/shown by code).
 DEV_TABS = {"Level & Stats", "Stat Search", "Signatures"}
@@ -157,7 +158,8 @@ class BridgeApp(ctk.CTk):
                 else:
                     self.after(0, lambda: self.set_status(f"Vocation unknown: {res}"))
             except Exception as e:
-                self.after(0, lambda: self.set_status(f"Error: {e}"))
+                err = f"Error: {e}"
+                self.after(0, lambda: self.set_status(err))
         run_async(self, _do)
 
     def set_vocation(self):
@@ -174,7 +176,8 @@ class BridgeApp(ctk.CTk):
                 self.after(0, lambda: (self.set_status(f"Vocation set: {res}"),
                                        self.refresh_all_target()))
             except Exception as e:
-                self.after(0, lambda: self.set_status(f"Error: {e}"))
+                err = f"Error: {e}"
+                self.after(0, lambda: self.set_status(err))
         run_async(self, _do)
 
     def unlock_all_vocations(self):
@@ -186,7 +189,8 @@ class BridgeApp(ctk.CTk):
                 res = client.send("unlock_all_vocations", self.target(), timeout=15)
                 self.after(0, lambda: self.set_status(res))
             except Exception as e:
-                self.after(0, lambda: self.set_status(f"Error: {e}"))
+                err = f"Error: {e}"
+                self.after(0, lambda: self.set_status(err))
         run_async(self, _do)
 
     def refresh_pawns(self):
@@ -205,7 +209,8 @@ class BridgeApp(ctk.CTk):
                             labels.append(f"{i.strip()}: {lab.strip()}")
                 self.after(0, lambda: self._set_pawns(idx, labels))
             except Exception as e:
-                self.after(0, lambda: self.set_status(f"Pawn list: {e}"))
+                err = f"Pawn list: {e}"
+                self.after(0, lambda: self.set_status(err))
         run_async(self, _do)
 
     def _set_pawns(self, idx, labels):
@@ -232,7 +237,8 @@ class BridgeApp(ctk.CTk):
                 res = client.send("select_pawn", i, timeout=15)
                 self.after(0, lambda: self._after_pawn_pick(res))
             except Exception as e:
-                self.after(0, lambda: self.set_status(f"Error: {e}"))
+                err = f"Error: {e}"
+                self.after(0, lambda: self.set_status(err))
         run_async(self, _do)
 
     def _after_pawn_pick(self, res):
@@ -299,6 +305,7 @@ class BridgeApp(ctk.CTk):
             ("ITEMS", "Item Stats", ItemStatsTab),
             ("ITEMS", "Duplicate Items", DuplicateItemsTab),
             ("PAWN", "Rating & Badges", PawnTab),
+            ("PAWN", "Names", NamesTab),
             ("CHARACTER", "Weapon Skills", WeaponSkillsTab),
             ("CHARACTER", "Upgraded Skills", UpgradedSkillsTab),
             ("CHARACTER", "Core Skills & Augments", CoreAugmentsTab),

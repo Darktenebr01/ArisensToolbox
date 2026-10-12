@@ -192,7 +192,8 @@ class ItemStatsTab(ctk.CTkFrame):
             res = client.send("item_totals", row, timeout=15)
             self.after(0, lambda: self.totals_var.set(res))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def dump_fields(self):
         row = self._row()
@@ -211,7 +212,8 @@ class ItemStatsTab(ctk.CTkFrame):
             self.after(0, lambda: (show_probe(self, "Item stat dump - copy all of it", text),
                                    self.app.set_status(f"Dump done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- enhancement --------------------------------------------------
 
@@ -254,7 +256,8 @@ class ItemStatsTab(ctk.CTkFrame):
                 self.app.set_status("Enhancement read.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def apply_enh(self):
         row = self._row()
@@ -286,7 +289,8 @@ class ItemStatsTab(ctk.CTkFrame):
             res = client.send("item_set_enh", row, level, *types, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Applied: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- base stats ---------------------------------------------------
 
@@ -318,7 +322,8 @@ class ItemStatsTab(ctk.CTkFrame):
                     self.app.set_status(f"Read {len(rows)} stat(s) ({res}).")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def set_stat(self):
         row = self._row()
@@ -345,7 +350,8 @@ class ItemStatsTab(ctk.CTkFrame):
             self.after(0, lambda: (self.app.set_status(f"Applied: {res}"),
                                    self.read_stats(quiet=True)))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def recalc(self):
         row = self._row()
@@ -361,7 +367,8 @@ class ItemStatsTab(ctk.CTkFrame):
             res = client.send("item_recalc", row, timeout=15)
             self.after(0, lambda: self.app.set_status(res))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- special effect -----------------------------------------------
 
@@ -389,7 +396,8 @@ class ItemStatsTab(ctk.CTkFrame):
                 self.app.set_status("Special effect read.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def apply_special(self):
         row = self._row()
@@ -410,7 +418,8 @@ class ItemStatsTab(ctk.CTkFrame):
             res = client.send("item_set_special", row, *vals, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Applied: {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def probe_special(self):
         row = self._row()
@@ -429,7 +438,8 @@ class ItemStatsTab(ctk.CTkFrame):
             self.after(0, lambda: (show_probe(self, "Special-effect probe - copy all of it", text),
                                    self.app.set_status(f"Probe done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def sweep_specials(self):
         client = require_client(self.app)
@@ -445,4 +455,5 @@ class ItemStatsTab(ctk.CTkFrame):
             self.after(0, lambda: (show_probe(self, "Special sweep - copy all of it", text),
                                    self.app.set_status(f"Sweep done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))

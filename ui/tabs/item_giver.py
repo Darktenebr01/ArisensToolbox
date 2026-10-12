@@ -108,7 +108,8 @@ class ItemGiverTab(ctk.CTkFrame):
                 self.app.set_status(f"Loaded {len(items)} items (game said {count})."),
             ))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Item list failed: {e}"))
+            err = f"Item list failed: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def refresh_list(self):
         tokens = self.search_var.get().lower().split()
@@ -154,4 +155,5 @@ class ItemGiverTab(ctk.CTkFrame):
             res = client.send("give_item", iid, qty, 1 if to_storage else 0, timeout=15)
             self.after(0, lambda: self.app.set_status(f"{res}: {qty} x item {iid}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))

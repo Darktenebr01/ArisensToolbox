@@ -76,7 +76,8 @@ class UpgradedSkillsTab(ctk.CTkFrame):
                                    "(or unequip/re-equip the weapon) to see the change."),
             ))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def undo_async(self):
         client = require_client(self.app)
@@ -93,7 +94,8 @@ class UpgradedSkillsTab(ctk.CTkFrame):
                 self.note_var.set(""),
             ))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def refresh_skills(self):
         pass  # nothing target-specific to reload here

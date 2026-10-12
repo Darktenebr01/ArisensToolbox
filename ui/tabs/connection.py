@@ -9,12 +9,13 @@ import customtkinter as ctk
 from bridge.game_path import (
     find_data_dir, data_dir_or_raise, game_dir_from_data_dir,
     bundled_lua_path, bundled_lua_version,
+    get_custom_exe, set_custom_exe, clear_custom_exe, game_exe_name,
 )
 from bridge.protocol import BridgeClient, BridgeError, BridgeTimeout
 from ui import theme as T
 from ui.widgets import Card, card_content, H1, Muted, PrimaryButton, GhostButton
 
-EXPECTED_MAJOR = "1.26"  # must match ddbridge.lua's pong
+EXPECTED_MAJOR = "1.37"  # must match ddbridge.lua's pong
 REFRAMEWORK_URL = ("https://github.com/praydog/REFramework-nightly/releases/"
                    "latest/download/REFramework.zip")
 DD2_STEAM_APPID = "2054970"
@@ -38,10 +39,11 @@ def game_running():
     if os.name != "nt":
         return False
     import subprocess
+    name = game_exe_name()
     try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq DD2.exe"],
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"],
                              capture_output=True, text=True, timeout=10).stdout
-        return "DD2.exe" in out
+        return name.lower() in out.lower()
     except Exception:
         return False
 
@@ -135,7 +137,7 @@ class ConnectionTab(ctk.CTkFrame):
         # game folder card
         card = Card(self, row=1, column=0, sticky="ew", padx=4, pady=6)
         cc = card_content(card)
-        ctk.CTkLabel(cc, **T.body("Game data folder:")).grid(
+        ctk.CTkLabel(cc, **T.body("Game folder:")).grid(
             row=0, column=0, sticky="w")
         self.path_var = ctk.StringVar(value="(not detected)")
         ctk.CTkLabel(
@@ -146,8 +148,10 @@ class ConnectionTab(ctk.CTkFrame):
         brow.grid(row=2, column=0, sticky="w")
         GhostButton(brow, text="Detect", width=90,
                     command=self.detect).pack(side="left", padx=(0, 8))
-        GhostButton(brow, text="Browse...", width=90,
-                    command=self.browse).pack(side="left")
+        GhostButton(brow, text="Browse DD2.exe...", width=130,
+                    command=self.browse).pack(side="left", padx=(0, 8))
+        GhostButton(brow, text="Reset", width=90,
+                    command=self.reset).pack(side="left")
 
         # connect card
         card2 = Card(self, row=2, column=0, sticky="ew", padx=4, pady=6)
@@ -169,8 +173,11 @@ class ConnectionTab(ctk.CTkFrame):
             "   refreshes it when the game was updated after it was installed\n"
             "   (keeps up with Title Updates like 4.0).\n"
             "2. Installs or updates ddbridge.lua to the bundled version.\n"
-            "3. Launches Dragon's Dogma 2 through Steam.\n"
+            "3. Launches Dragon's Dogma 2 - through Steam, or directly\n"
+            "   from the DD2.exe you picked with \"Browse DD2.exe...\".\n"
             "4. Connects automatically once your save is loaded.\n\n"
+            "No Steam needed: pick your DD2.exe once and the client\n"
+            "remembers it. \"Reset\" goes back to auto-detection.\n\n"
             "The client talks to the game through text files in\n"
             "reframework/data/ddbridge/ - no memory scanning."
         )
@@ -181,17 +188,31 @@ class ConnectionTab(ctk.CTkFrame):
     # -- actions ------------------------------------------------------
 
     def detect(self):
-        d = find_data_dir()
-        self.data_dir = d
-        self.path_var.set(d or "(not detected - use Browse)")
-        self.app.set_status("Game folder detected." if d else "Game folder not found.")
+        from bridge.game_path import find_game_dir
+        g = find_game_dir()
+        self.data_dir = find_data_dir()
+        if g:
+            tag = " (your pick)" if get_custom_exe() else " (auto-detected)"
+            self.path_var.set(g + tag)
+        else:
+            self.path_var.set("(not detected - use Browse DD2.exe...)")
+        self.app.set_status("Game folder detected." if g else "Game folder not found.")
 
     def browse(self):
         from tkinter import filedialog
-        d = filedialog.askdirectory(title="Select the ddbridge data folder (reframework/data/ddbridge)")
-        if d:
-            self.data_dir = d
-            self.path_var.set(d)
+        f = filedialog.askopenfilename(
+            title="Select DD2.exe",
+            filetypes=[("DD2.exe", "DD2.exe"),
+                       ("Executables", "*.exe"),
+                       ("All files", "*.*")])
+        if f:
+            set_custom_exe(f)
+            self.detect()
+            self.app.set_status(f"Using {f} - press Start.")
+
+    def reset(self):
+        clear_custom_exe()
+        self.detect()
 
     def start_async(self):
         self.connect_btn.configure(state="disabled", text="Working...")
@@ -267,13 +288,20 @@ class ConnectionTab(ctk.CTkFrame):
 
         # 4. Launch the game (no-op if already running).
         if not was_running:
+            custom = get_custom_exe()
             try:
-                self._status("Starting Dragon's Dogma 2 via Steam...")
-                if os.name == "nt":
-                    os.startfile(f"steam://run/{DD2_STEAM_APPID}")
+                if custom:
+                    self._status(
+                        f"Starting {os.path.basename(custom)} directly...")
+                    import subprocess
+                    subprocess.Popen([custom], cwd=game_dir)
                 else:
-                    import webbrowser
-                    webbrowser.open(f"steam://run/{DD2_STEAM_APPID}")
+                    self._status("Starting Dragon's Dogma 2 via Steam...")
+                    if os.name == "nt":
+                        os.startfile(f"steam://run/{DD2_STEAM_APPID}")
+                    else:
+                        import webbrowser
+                        webbrowser.open(f"steam://run/{DD2_STEAM_APPID}")
             except Exception as e:
                 self._done(False,
                     f"Could not launch the game: {e}. "

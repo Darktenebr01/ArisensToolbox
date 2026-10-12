@@ -105,7 +105,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
             normal_name = E.get("normalName", {})
             self.after(0, lambda: self._apply_core(rows, normal_name))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _apply_core(self, rows, normal_name):
         self.nlist.delete(0, tk.END)
@@ -132,7 +133,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
             client.send("enable_nskill", tgt, sid, timeout=15)
             self.after(0, lambda: self.app.set_status("Enabled."))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self.refresh_async()
 
     def enable_all_async(self, incl_other):
@@ -148,7 +150,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
             res = client.send("enable_nskills", *args, timeout=60)
             self.after(0, lambda: self.app.set_status(f"Enabled {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self.refresh_async()
 
     def core_dump_async(self):
@@ -170,7 +173,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
             text = client.read_sidecar(filename) or f"({filename} missing)"
             self.after(0, lambda: show_probe(self, title, text))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- augments -----------------------------------------------------
 
@@ -200,7 +204,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
             client.send("set_augment", tgt, job, slot, sid, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Augment {slot + 1} -> {label}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self.refresh_async()
 
     def _do_augments(self, client, tgt, job, E):
@@ -211,7 +216,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
             A = E["jobsAbility"][job - 1]
             self.after(0, lambda: self._apply_augments(ids, A))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Augments: {e}"))
+            err = f"Augments: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _apply_augments(self, ids, A):
         self._busy = True
@@ -236,5 +242,6 @@ class CoreAugmentsTab(ctk.CTkFrame):
             res = client.send("unlock_augments", tgt, job, "all", timeout=60)
             self.after(0, lambda: self.app.set_status(f"Unlocked {res}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self.refresh_async()

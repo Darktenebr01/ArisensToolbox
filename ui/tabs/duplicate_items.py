@@ -129,7 +129,8 @@ class DuplicateItemsTab(ctk.CTkFrame):
                     self.app.set_status("No inventory found - load a save.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def load_rows_async(self):
         if not self.owner_idx:
@@ -168,7 +169,8 @@ class DuplicateItemsTab(ctk.CTkFrame):
                 self.app.set_status(f"{len(rows)} item(s).")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     # -- list ----------------------------------------------------------
 
@@ -224,7 +226,8 @@ class DuplicateItemsTab(ctk.CTkFrame):
             res = client.send("dup_do", sel, copies, to_storage, props, timeout=60)
             self.after(0, lambda: (self.app.set_status(res), self.load_rows_async()))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def probe_async(self):
         if not self.sel:
@@ -241,4 +244,5 @@ class DuplicateItemsTab(ctk.CTkFrame):
             res = client.send("dup_probe", sel, timeout=60)
             self.after(0, lambda: self.app.set_status(res))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))

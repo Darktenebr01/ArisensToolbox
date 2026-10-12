@@ -119,7 +119,8 @@ class StatSearchTab(ctk.CTkFrame):
                     rows.append((int(si), label, kind, name, value))
             self.after(0, lambda: self._apply_search(rows, res, quiet))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _apply_search(self, rows, res, quiet):
         self.flist.delete(0, tk.END)
@@ -156,7 +157,8 @@ class StatSearchTab(ctk.CTkFrame):
             self.after(0, lambda: self.app.set_status(
                 "Set and locked." if lock_s == "1" else "Set."))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self._do_search(client, tgt, self.filter_var.get().strip(), quiet=True)
 
     def clear_locks_async(self):
@@ -170,7 +172,8 @@ class StatSearchTab(ctk.CTkFrame):
             res = client.send("clear_locks", timeout=15)
             self.after(0, lambda: self.app.set_status(f"Cleared {res} lock(s)."))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def refresh_all(self):
         # re-run the last search quietly against the new target

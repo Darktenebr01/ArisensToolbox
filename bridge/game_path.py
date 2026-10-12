@@ -63,21 +63,66 @@ def _from_steam_libraries():
     return None
 
 
+def _client_base():
+    """Folder the client lives in (writable spot for small settings files)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _custom_exe_file():
+    return os.path.join(_client_base(), "dd2_exe.txt")
+
+
+def get_custom_exe():
+    """Full path to a user-picked game exe, or None."""
+    try:
+        with open(_custom_exe_file(), "r", encoding="utf-8") as f:
+            p = f.read().strip()
+    except OSError:
+        return None
+    if p and os.path.isfile(p):
+        return p
+    return None
+
+
+def set_custom_exe(path):
+    with open(_custom_exe_file(), "w", encoding="utf-8") as f:
+        f.write(path)
+
+
+def clear_custom_exe():
+    try:
+        os.remove(_custom_exe_file())
+    except OSError:
+        pass
+
+
+def game_exe_name():
+    """Exe file name to look for when checking if the game runs."""
+    custom = get_custom_exe()
+    return os.path.basename(custom) if custom else "DD2.exe"
+
+
 def find_game_dir():
     """Return the DD2 install folder, or None."""
-    # 1. explicit override (dev/testing)
+    # 1. exe the user picked in the UI (their explicit choice wins)
+    custom = get_custom_exe()
+    if custom:
+        return os.path.dirname(custom)
+    # 2. explicit override (dev/testing)
     override = os.environ.get("DD2_BRIDGE_GAME_DIR")
     if override and os.path.isfile(os.path.join(override, "DD2.exe")):
         return override
-    # 2. registry
+    # 3. registry
     path = _from_registry()
     if path:
         return path
-    # 3. other Steam libraries
+    # 4. other Steam libraries
     path = _from_steam_libraries()
     if path:
         return path
-    # 4. common paths
+    # 5. common paths
     for p in COMMON_PATHS:
         if os.path.isfile(os.path.join(p, "DD2.exe")):
             return p

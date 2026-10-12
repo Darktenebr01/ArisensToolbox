@@ -190,7 +190,8 @@ class WeaponSkillsTab(ctk.CTkFrame):
             client.send("set_wskill", tgt, job, slot, sid, lvl, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Slot {slot + 1} -> {label}"))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self.refresh_async(quiet=True)
 
     # -- refresh ------------------------------------------------------
@@ -213,7 +214,8 @@ class WeaponSkillsTab(ctk.CTkFrame):
             owner = _custom_owner(E)
             self.after(0, lambda: self._apply_wskills(ids, owner, job, quiet))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self._do_wstate(client, tgt, job, E)
 
     def _apply_wskills(self, ids, owner, job, quiet):
@@ -245,7 +247,8 @@ class WeaponSkillsTab(ctk.CTkFrame):
             custom_name = E.get("customName", {})
             self.after(0, lambda: self._apply_wstate(rows, custom_name))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def _apply_wstate(self, rows, custom_name):
         self.wlist.delete(0, tk.END)
@@ -278,7 +281,8 @@ class WeaponSkillsTab(ctk.CTkFrame):
             msg = ok_msg if ok_msg else res
             self.after(0, lambda: self.app.set_status(msg))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         if after:
             after()
 
@@ -351,7 +355,8 @@ class WeaponSkillsTab(ctk.CTkFrame):
                 self.app.set_status(f"Probe: {res}"),
             ))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
         self._do_wstate(client, tgt, job, self.app.enum_data or {})
 
     def eq_probe_async(self, cmd, filename, title):
@@ -372,4 +377,5 @@ class WeaponSkillsTab(ctk.CTkFrame):
                 self.app.set_status(f"Probe done: {res} ({n} lines)."),
             ))
         except (BridgeError, BridgeTimeout) as e:
-            self.after(0, lambda: self.app.set_status(f"Error: {e}"))
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
