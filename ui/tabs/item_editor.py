@@ -154,6 +154,65 @@ class ItemEditorTab(ctk.CTkFrame):
         Muted(cc, "Written to the item, then synced + recalculated.",
               row=3, column=0, sticky="w", pady=(8, 0))
 
+        # element card
+        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
+        r += 1
+        cc = card_content(card)
+        H2(cc, "Element", row=0, column=0, sticky="w", pady=(0, 6))
+        erow = ctk.CTkFrame(cc, fg_color="transparent")
+        erow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(erow, **T.body("Element:")).pack(side="left")
+        self.elem_combo = Combo(
+            erow, values=["(select an item first)"], width=240)
+        self.elem_combo.pack(side="left", padx=8)
+        self.elem_combo.set("(select an item first)")
+        PrimaryButton(erow, text="Apply element", width=130,
+                      command=self.apply_element).pack(side="left")
+        prow = ctk.CTkFrame(cc, fg_color="transparent")
+        prow.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(prow, **T.body("Element %:")).pack(side="left")
+        self.elem_pct_var = ctk.StringVar(value="")
+        Field(prow, textvariable=self.elem_pct_var, width=70).pack(side="left", padx=8)
+        PrimaryButton(prow, text="Apply %", width=90,
+                      command=self.apply_elem_pct).pack(side="left")
+        GhostButton(prow, text="Clear %", width=90,
+                    command=self.clear_elem_pct).pack(side="left", padx=8)
+        self.elem_info_var = ctk.StringVar(value="")
+        ctk.CTkLabel(cc, textvariable=self.elem_info_var,
+                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
+            row=3, column=0, sticky="w")
+        Muted(cc, "Only one enhancement works per item (blue triangle) - setting "
+              "an element replaces any enhanced ability/stat bonus. The item "
+              "is marked appraised so the element shows in game. "
+              "Element restrictions are lifted automatically when the bridge "
+              "loads, so any weapon can take any element and forced elements "
+              "stay after a restart.",
+              row=4, column=0, sticky="w", pady=(8, 0))
+
+        # rename card
+        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
+        r += 1
+        cc = card_content(card)
+        H2(cc, "Rename item", row=0, column=0, sticky="w", pady=(0, 6))
+        nrow = ctk.CTkFrame(cc, fg_color="transparent")
+        nrow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(nrow, **T.body("New name:")).pack(side="left")
+        self.rename_var = ctk.StringVar(value="")
+        Field(nrow, textvariable=self.rename_var, width=260).pack(side="left", padx=8)
+        PrimaryButton(nrow, text="Apply name", width=110,
+                      command=self.apply_item_name).pack(side="left")
+        GhostButton(nrow, text="Clear name", width=110,
+                    command=self.clear_item_name).pack(side="left", padx=8)
+        GhostButton(nrow, text="DIAG name", width=100,
+                    command=self.diag_item_name).pack(side="left")
+        GhostButton(nrow, text="PROBE type", width=100,
+                    command=self.probe_item_type).pack(side="left", padx=8)
+        Muted(cc, "Renames all items of this type in game (names are shared "
+              "per item type). The rename is re-applied when the inventory "
+              "loads. Clear removes the saved rename; restart the game to "
+              "restore the original name.",
+              row=2, column=0, sticky="w", pady=(8, 0))
+
         # probes card
         card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
         r += 1
@@ -342,6 +401,8 @@ class ItemEditorTab(ctk.CTkFrame):
                     f"Editing: {name}"
                     + ("  (equipped - press APPLY to game after changes)" if equipped else ""))
             self.after(0, _ui)
+            self.load_element()
+            self.load_item_name()
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -474,6 +535,267 @@ class ItemEditorTab(ctk.CTkFrame):
         try:
             res = client.send("item_set_appraisal", row, *vals, appr, timeout=15)
             self.after(0, lambda: self.app.set_status(f"Applied: {res}"))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    # -- element ------------------------------------------------------
+
+    def _elem_label(self, cur, is_weapon):
+        if cur == "ThunderElement":
+            return "Lightning"
+        if cur == "LightElement":
+            return "Holy"
+        if cur == "FireElement":
+            return "Fire"
+        if cur == "IceElement":
+            return "Ice"
+        if cur == "None":
+            return "None"
+        if cur == "several":
+            return "Several bits set (invalid - pick one)"
+        if cur.startswith("Slot"):
+            return f"Ability slot {cur[4:]} enhanced"
+        if cur == "PhysicalParam":
+            return "Attack enhanced" if is_weapon else "Defense enhanced"
+        if cur == "MagicParam":
+            return ("Magick Attack enhanced" if is_weapon
+                    else "Magick Defense enhanced")
+        if cur == "BlowParam":
+            return "Knockdown enhanced"
+        if cur == "SlashDefence":
+            return "Slash Defense enhanced"
+        if cur == "StrikeDefence":
+            return "Strike Defense enhanced"
+        return cur
+
+    def load_element(self):
+        if not self.sel_row:
+            return
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._load_element(client, row))
+
+    def _load_element(self, client, row):
+        try:
+            res = client.send("item_get_element", row, timeout=15)
+            parts = res.split("|")
+            cur = parts[0] if len(parts) > 0 else "?"
+            allowed = parts[1] if len(parts) > 1 else "?"
+            game_elem = parts[2] if len(parts) > 2 else "?"
+            is_weapon = len(parts) > 3 and parts[3] == "1"
+            cur_label = self._elem_label(cur, is_weapon)
+            if allowed == "?":
+                opts = ["Fire", "Ice", "Lightning", "Holy"]
+                note = ("Allowed list unavailable - the game will ignore "
+                        "disallowed elements.")
+            elif allowed == "":
+                opts = []
+                note = "This item can't have an element (game rules)."
+            else:
+                opts = [o for o in allowed.split(",") if o]
+                note = ""
+            if not is_weapon:
+                note = (("Elements are for weapons. " if note == "" else "")
+                        + note).strip()
+            values = [f"[current] {cur_label}",
+                      "None - clear enhancement"] + opts
+            res2 = client.send("item_get_elem_store", row, timeout=15)
+            p2 = res2.split("|")
+            computed = p2[0] if len(p2) > 0 else "?"
+            over = p2[1] if len(p2) > 1 else ""
+            pct_txt = f"Element %: {computed}"
+            if over != "":
+                pct_txt += f" (override: {over}%)"
+            else:
+                pct_txt += " (game default)"
+            info = (f"Current: {cur_label}  |  Game computes: {game_elem}  |  "
+                    f"{pct_txt}")
+            if note:
+                info += f"  |  {note}"
+
+            def _ui():
+                self.elem_combo.configure(values=values)
+                self.elem_combo.set(values[0])
+                self.elem_pct_var.set(computed)
+                self.elem_info_var.set(info)
+            self.after(0, _ui)
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+
+            def _ui2():
+                self.elem_combo.configure(
+                    values=["(this item has no ability data)"])
+                self.elem_combo.set("(this item has no ability data)")
+                self.elem_info_var.set("")
+            self.after(0, lambda: (self.app.set_status(err), _ui2()))
+
+    def apply_element(self):
+        if not self.sel_row:
+            self.app.set_status("Select an item first.")
+            return
+        val = self.elem_combo.get()
+        if val.startswith("[current]"):
+            self.app.set_status("Element unchanged.")
+            return
+        if val in ("(select an item first)",
+                   "(this item has no ability data)"):
+            return
+        want = "None" if val == "None - clear enhancement" else val
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._apply_element(client, row, want))
+
+    def _apply_element(self, client, row, want):
+        try:
+            res = client.send("item_set_element", row, want, timeout=15)
+            msg = f"Element set to {want} (marked appraised). {res}"
+
+            def _ui():
+                self.load_element()
+                self.app.set_status(msg)
+            self.after(0, _ui)
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def apply_elem_pct(self):
+        if not self.sel_row:
+            self.app.set_status("Select an item first.")
+            return
+        val = self.elem_pct_var.get().strip()
+        if val == "":
+            self._send_elem_pct("clear")
+            return
+        try:
+            pct = math.floor(float(val))
+        except ValueError:
+            self.app.set_status("Enter a number for Element %.")
+            return
+        if pct < 0:
+            self.app.set_status("Element % cannot be negative.")
+            return
+        self._send_elem_pct(str(pct))
+
+    def clear_elem_pct(self):
+        if not self.sel_row:
+            self.app.set_status("Select an item first.")
+            return
+        self._send_elem_pct("clear")
+
+    # -- rename -------------------------------------------------------
+
+    def apply_item_name(self):
+        if not self.sel_row:
+            self.app.set_status("Select an item first.")
+            return
+        name = self.rename_var.get().strip()
+        if not name:
+            self.app.set_status("Enter a name first.")
+            return
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._apply_item_name(client, row, name))
+
+    def clear_item_name(self):
+        if not self.sel_row:
+            self.app.set_status("Select an item first.")
+            return
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._apply_item_name(client, row, "clear"))
+
+    def diag_item_name(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._diag_item_name(client))
+
+    def probe_item_type(self):
+        if not self.sel_row:
+            self.app.set_status("Select an item first.")
+            return
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._probe_item_type(client, row))
+
+    def _probe_item_type(self, client, row):
+        try:
+            res = client.send("item_type_probe", row, timeout=15)
+            msg = res
+            self.after(0, lambda: self.app.set_status(msg))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def _diag_item_name(self, client):
+        try:
+            res = client.send("item_name_diag", timeout=15)
+            msg = res
+            self.after(0, lambda: self.app.set_status(msg))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def _apply_item_name(self, client, row, name):
+        try:
+            res = client.send("item_set_name", row, name, timeout=15)
+            msg = res
+
+            def _ui():
+                self.app.set_status(msg)
+                self.reload_owners()
+            self.after(0, _ui)
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def load_item_name(self):
+        if not self.sel_row:
+            return
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._load_item_name(client, row))
+
+    def _load_item_name(self, client, row):
+        try:
+            res = client.send("item_get_name", row, timeout=15)
+            cur, _, custom = res.partition("|")
+
+            def _ui():
+                self.rename_var.set(custom or cur)
+            self.after(0, _ui)
+        except (BridgeError, BridgeTimeout):
+            pass
+
+    def _send_elem_pct(self, val):
+        client = require_client(self.app)
+        if not client:
+            return
+        row = self.sel_row
+        run_async(self, lambda: self._apply_elem_pct(client, row, val))
+
+    def _apply_elem_pct(self, client, row, val):
+        try:
+            res = client.send("item_set_elem_store", row, val, timeout=15)
+            msg = f"Element % set ({val}). {res}"
+
+            def _ui():
+                self.load_element()
+                self.app.set_status(msg)
+            self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

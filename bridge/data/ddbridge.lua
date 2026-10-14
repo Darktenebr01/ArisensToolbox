@@ -1,4 +1,4 @@
--- ddbridge.lua  v1.37.0  (Dragon's Dogma 2 / REFramework)
+-- ddbridge.lua  v1.86.0  (Dragon's Dogma 2 / REFramework)
 -- Command bridge for the "DD2 Bridge" Cheat Engine table.
 -- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
 -- The Cheat Engine table writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
@@ -240,7 +240,7 @@ local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
 -- each command gets the argument list (strings) and returns a one-line string payload
 local COMMANDS = {}
 
-COMMANDS.ping = function() return "pong ddbridge 1.37.0" end
+COMMANDS.ping = function() return "pong ddbridge 1.86.0" end
 
 COMMANDS.list_items = function() return tostring(build_items()) end
 
@@ -1905,11 +1905,13 @@ COMMANDS.item_owners = function()
 end
 
 -- args: owner idx, only equipment(0/1), only equipped(0/1) -> writes itemrows.txt
+local reapply_item_names
 COMMANDS.item_rows = function(a)
   local oi, only_equip, only_equipped = int(a[1]), a[2] == "1", a[3] == "1"
   local o = IT.owners[oi]
   if not o then error("owner not found - reload the inventory first") end
   IT.owner_idx = oi
+  reapply_item_names(o.masters)
   local rows = {}
   for _, m in ipairs(o.masters) do
     local d = describe(m)
@@ -1966,6 +1968,818 @@ COMMANDS.item_set_appraisal = function(a)
     ab:set_field("IsAppraised", a[6] == "1")
   end)
   return full_apply(r.master)
+end
+
+-- ---------------------------------------------------------------- element (blue-triangle enhancement)
+local ELEM_BITS = { "FireElement", "IceElement", "ThunderElement", "LightElement" }
+local ELEM_LABELS = { FireElement = "Fire", IceElement = "Ice", ThunderElement = "Lightning", LightElement = "Holy" }
+local ELEM_FROM_LABEL = { Fire = "FireElement", Ice = "IceElement", Lightning = "ThunderElement", Holy = "LightElement" }
+local BONUS_ORDER = { "Slot1", "Slot2", "Slot3", "Slot4", "PhysicalParam", "MagicParam", "BlowParam",
+  "SlashDefence", "StrikeDefence", "FireElement", "IceElement", "ThunderElement", "LightElement" }
+
+local bonus_bits_cache = nil
+local function bonus_bits()
+  if bonus_bits_cache then return bonus_bits_cache end
+  local t = {}
+  for _, e in ipairs(enum_list("app.EquipmentAbilityBonus")) do t[e.name] = e.value end
+  bonus_bits_cache = t
+  return t
+end
+
+local function bonus_mask()
+  local m, bits = 0, bonus_bits()
+  for _, n in ipairs(BONUS_ORDER) do m = m | (bits[n] or 0) end
+  return m
+end
+
+-- current enhancement bit name: "None", one BONUS_ORDER name, or "several"
+local function bonus_cur_name(bonus)
+  local bits = bonus_bits()
+  local cur = (bonus or 0) & bonus_mask()
+  if cur == 0 then return "None" end
+  for _, n in ipairs(BONUS_ORDER) do if cur == (bits[n] or 0) then return n end end
+  return "several"
+end
+
+-- element labels this item may carry (game rules); nil if the query fails
+local function valid_element_names(master)
+  local item_id = try(function() return master:call("get_ItemId") end)
+  local ab = get_ability(master)
+  if type(item_id) ~= "number" or not ab then return nil end
+  local td = sdk.find_type_definition("app.EquipmentAbilityUtil")
+  local m = td and find_method(td, "getValidBonusIgnoreGrade", { "app.ItemIDEnum", "app.ItemDefine.EquipmentAbilityParam" })
+  local set = m and try(function() return m:call(nil, item_id, ab) end)
+  if not set then return nil end
+  local bits, out = bonus_bits(), {}
+  for _, n in ipairs(ELEM_BITS) do
+    local b = bits[n]
+    if b and try(function() return set:call("Contains", b) end) == true then out[#out + 1] = ELEM_LABELS[n] end
+  end
+  return out
+end
+
+-- element the game itself computes for this item (verification read)
+local function game_element(master)
+  local param = try(function() return master:call("get_Param") end)
+  local enh = param and try(function() return param:call("makeEnhancedParam") end)
+  local v = enh and try(function() return enh:call("get_Element") end)
+  if type(v) ~= "number" then return "?" end
+  local n = enum_by_val("app.AttackUserData.ElementType")[v] or ("#" .. tostring(v))
+  if n == "Thunder" then return "Lightning" end
+  if n == "Light" then return "Holy" end
+  return n
+end
+
+-- "curBitName|allowedCsv|gameElement|isWeapon" ; allowedCsv "?" if the rule query failed
+COMMANDS.item_get_element = function(a)
+  local r = row_of(a[1])
+  local ab = get_ability(r.master)
+  if not ab then error("could not read ability") end
+  local bonus = try(function() return ab:get_field("Bonus") end) or 0
+  local allowed = valid_element_names(r.master)
+  local item = try(function() return r.master:call("get_ItemData") end)
+  local dtype = item and try(function() return item:get_field("<DataType>k__BackingField") end)
+  return table.concat({ bonus_cur_name(bonus),
+    allowed and table.concat(allowed, ",") or "?",
+    game_element(r.master), dtype == 2 and "1" or "0" }, "|")
+end
+
+-- args: row, element (None/Fire/Ice/Lightning/Holy). Replaces any other
+-- enhancement bit (only one works) and marks the item appraised so the
+-- element actually shows in game. Refuses elements the game's rules
+-- disallow for this item.
+COMMANDS.item_set_element = function(a)
+  local r = row_of(a[1])
+  local want = a[2] or "None"
+  local bit = 0
+  if want ~= "None" then
+    local name = ELEM_FROM_LABEL[want]
+    if not name then error("bad element: " .. tostring(want)) end
+    bit = bonus_bits()[name] or error("element bit not found: " .. name)
+    local allowed = valid_element_names(r.master)
+    if allowed then
+      local ok = false
+      for _, x in ipairs(allowed) do if x == want then ok = true end end
+      if not ok then error("this item cannot have " .. want .. " (game rules)") end
+    end
+  end
+  write_ability(r.master, function(ab)
+    local bonus = try(function() return ab:get_field("Bonus") end) or 0
+    ab:set_field("Bonus", (bonus & ~bonus_mask()) | bit)
+    ab:set_field("IsAppraised", true)
+  end)
+  return full_apply(r.master)
+end
+
+-- args: row. Dumps every field that could hold the element % to elemprobe.txt:
+-- all fields of EquipmentAbilityParam, all fields of makeEnhancedParam(),
+-- element-named fields of WeaponParam and StorageData.
+COMMANDS.item_element_probe = function(a)
+  local r = row_of(a[1])
+  local lines = {}
+  local function add(s) lines[#lines + 1] = s end
+  local function dump_fields(tag, obj, only_elem)
+    add("== " .. tag .. " ==")
+    if not obj then add("(none)") return end
+    local td = try(function() return obj:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local n = try(function() return f:get_name() end)
+      if n and (not only_elem or n:find("lement")) then
+        local v = try(function() return obj:get_field(n) end)
+        add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+      end
+    end
+  end
+  dump_fields("EquipmentAbilityParam (ability)", get_ability(r.master), false)
+  local param = try(function() return r.master:call("get_Param") end)
+  local enh = param and try(function() return param:call("makeEnhancedParam") end)
+  dump_fields("makeEnhancedParam (EquipParam)", enh, false)
+  local item = try(function() return r.master:call("get_ItemData") end)
+  local wp = item and try(function() return item:call("get_WeaponParam") end)
+  dump_fields("WeaponParam (element fields)", wp, true)
+  dump_fields("StorageData (element fields)", param, true)
+  add("== StorageData._TempElement (inner fields) ==")
+  local temp = param and try(function() return param:get_field("_TempElement") end)
+  if temp then
+    local td = try(function() return temp:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local n = try(function() return f:get_name() end)
+      if n then
+        local v = try(function() return temp:get_field(n) end)
+        add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+      end
+    end
+  else add("(none)") end
+  add("== Enhance (get_Enhance) ==")
+  local enh2 = try(function() return r.master:call("get_Enhance") end)
+  if enh2 then
+    local td = try(function() return enh2:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local n = try(function() return f:get_name() end)
+      if n then
+        local v = try(function() return enh2:get_field(n) end)
+        add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+      end
+    end
+  else add("(none)") end
+  add("== StorageData (ALL fields) ==")
+  if param then
+    local td = try(function() return param:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local n = try(function() return f:get_name() end)
+      if n then
+        local v = try(function() return param:get_field(n) end)
+        add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+      end
+    end
+  end
+  add("== EquipParam array entries (all fields) ==")
+  if enh then
+    for _, an in ipairs({ "ElementType", "StoreType" }) do
+      local arr = try(function() return enh:get_field(an) end)
+      local els = arr and elems_of(arr)
+      add(an .. " n=" .. tostring(els and #els or "?"))
+      if els then
+        for i, e in ipairs(els) do
+          local td = try(function() return e:get_type_definition() end)
+          local tn = td and try(function() return td:get_full_name() end)
+          add("  [" .. i .. "] type=" .. tostring(tn))
+          for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+            local n = try(function() return f:get_name() end)
+            if n then
+              local v = try(function() return e:get_field(n) end)
+              add("    " .. n .. " = " .. tostring(v))
+            end
+          end
+        end
+      end
+    end
+  end
+  if not wr(DIR .. "elemprobe.txt", table.concat(lines, "\n")) then error("could not write elemprobe.txt") end
+  return "wrote elemprobe.txt (" .. #lines .. " lines)"
+end
+
+-- element restriction unlock (Kairos "remove element restriction"): the game
+-- decides which elements a weapon may carry in
+-- EquipmentAbilityUtil.gatherWeaponValidBonus(set, weaponParam). Hooking it
+-- and adding all four element bits to the set makes every weapon accept any
+-- element, for this session (hooks clear on game restart; disallowed
+-- elements then show as None again). One-way: hooks cannot be removed.
+local elem_unlock = { hooked = false }
+local function install_elem_unlock()
+  if elem_unlock.hooked then return "element restrictions already removed" end
+  local td = sdk.find_type_definition("app.EquipmentAbilityUtil")
+  local m = td and try(function()
+    return td:get_method("gatherWeaponValidBonus(System.Collections.Generic.HashSet`1<app.EquipmentAbilityBonus>, app.ItemWeaponParam)")
+  end)
+  if not m then error("gatherWeaponValidBonus not found") end
+  local ok = pcall(sdk.hook, m,
+    function(args)
+      local st = thread.get_hook_storage()
+      st.elem_set = try(function() return sdk.to_managed_object(args[2]) end)
+    end,
+    function(retval)
+      local st = thread.get_hook_storage()
+      local set = st.elem_set
+      st.elem_set = nil
+      if set then
+        local bits = bonus_bits()
+        for _, n in ipairs(ELEM_BITS) do
+          local b = bits[n]
+          if b then pcall(function() set:call("Add", b) end) end
+        end
+      end
+      return retval
+    end)
+  if not ok then error("element unlock hook failed") end
+  elem_unlock.hooked = true
+  return "element restrictions removed for this session - every weapon can now take any element"
+end
+
+COMMANDS.item_element_unlock = function(a)
+  return install_elem_unlock()
+end
+
+-- auto-install at load: forced elements must validate every session, and
+-- hooks do not survive a game restart. pcall: if the method is missing the
+-- game still loads fine and the button remains as a fallback.
+pcall(install_elem_unlock)
+
+-- element % overrides: the displayed % is EquipParam._ElementStore, which
+-- makeEnhancedParam hardcodes (no stored field feeds it), so override it in
+-- a post-hook. Keyed by chara:storage:item so it targets one item.
+-- Persisted to elemstore.txt so overrides survive restarts.
+local ELEM_DIAG = { installed = false, install_status = "not attempted", pre_calls = 0, matched = 0, last_key = nil, this_idx = nil, sret_idx = nil, post_sets = 0, last_args = nil }
+local WES_DIAG = { calls = 0, applied = 0 }
+local ELEM_ACTIVE_PTR = nil
+local ELEM_ACTIVE_PCT = nil
+local ELEM_STORE = {}
+local function elem_store_key(sd)
+  local c = try(function() return sd:get_field("_CharaId") end)
+  local s = try(function() return sd:get_field("_StorageId") end)
+  local i = try(function() return sd:get_field("_ItemId") end)
+  if c == nil or s == nil or i == nil then return nil end
+  return tostring(c) .. ":" .. tostring(s) .. ":" .. tostring(i)
+end
+local function elem_store_load()
+  local text = rd(DIR .. "elemstore.txt")
+  if not text then return end
+  for k, v in text:gmatch("([^=%s]+)=(%d+)") do ELEM_STORE[k] = tonumber(v) end
+end
+local ITEM_NAMES = {}
+local ITEM_NAMES_APPLIED = {}
+local function item_names_load()
+  local text = rd(DIR .. "itemnames.txt")
+  if not text then return end
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    local id, nm = line:match("^(%d+)=(.*)$")
+    if id and nm ~= "" then ITEM_NAMES[tonumber(id)] = nm end
+  end
+end
+local function item_names_save()
+  local lines = {}
+  for id, nm in pairs(ITEM_NAMES) do lines[#lines + 1] = tostring(id) .. "=" .. nm end
+  wr(DIR .. "itemnames.txt", table.concat(lines, "\n"))
+end
+item_names_load()
+local NAME_MAP = {}
+local NAME_DIAG = { installed = false, status = "not installed", calls = 0, matched = 0, id_field = nil, seen_id = nil, seen_ptr = nil, type_name = nil }
+local NAME_ID_FIELD = nil
+local function itemdata_item_id(item)
+  if NAME_ID_FIELD then
+    return try(function() return item:get_field(NAME_ID_FIELD) end)
+  end
+  for _, fn in ipairs({ "_ItemId", "ItemId", "_Id", "Id", "_ItemID", "ItemID" }) do
+    local v = try(function() return item:get_field(fn) end)
+    if type(v) == "number" then NAME_ID_FIELD = fn return v end
+  end
+  return nil
+end
+local function install_name_hook_from(td)
+  if NAME_DIAG.installed or not td then return false end
+  local m, cur = nil, td
+  while cur and not m do
+    m = find_method(cur, "get_Name", {})
+    if not m then cur = try(function() return cur:get_parent_type() end) end
+  end
+  if not m then return false end
+  local ok = pcall(sdk.hook, m,
+    function(args)
+      local st = thread.get_hook_storage()
+      st.name_obj = try(function() return sdk.to_managed_object(args[2]) end)
+    end,
+    function(retval)
+      local st = thread.get_hook_storage()
+      local obj = st.name_obj
+      st.name_obj = nil
+      NAME_DIAG.calls = NAME_DIAG.calls + 1
+      local custom = nil
+      if obj then
+        local id = itemdata_item_id(obj)
+        NAME_DIAG.id_field = NAME_ID_FIELD
+        NAME_DIAG.seen_id = id
+        custom = id and ITEM_NAMES[id]
+        if not custom then
+          local ptr = try(function() return sdk.to_int64(obj) end)
+          NAME_DIAG.seen_ptr = ptr
+          custom = ptr and NAME_MAP[ptr]
+        end
+      end
+      if custom then
+        NAME_DIAG.matched = NAME_DIAG.matched + 1
+        return sdk.create_managed_string(custom)
+      end
+      return retval
+    end)
+  if ok then
+    NAME_DIAG.installed = true
+    NAME_DIAG.status = "installed"
+    NAME_DIAG.type_name = try(function() return td:get_full_name() end)
+    log.info(TAG .. "name hook installed on " .. tostring(NAME_DIAG.type_name))
+    return true
+  end
+  return false
+end
+local function install_name_hook()
+  for _, tn in ipairs({ "app.ItemDataParam", "app.ItemDefine.ItemDataParam" }) do
+    local td = sdk.find_type_definition(tn)
+    if td and install_name_hook_from(td) then return end
+  end
+  if not NAME_DIAG.installed then NAME_DIAG.status = "get_Name not found" end
+end
+pcall(install_name_hook)
+reapply_item_names = function(masters)
+  if not NAME_DIAG.installed and #masters > 0 then
+    local it0 = try(function() return masters[1]:call("get_ItemData") end)
+    if it0 then
+      local td0 = try(function() return it0:get_type_definition() end)
+      install_name_hook_from(td0)
+    end
+  end
+  for _, m in ipairs(masters) do
+    local param = try(function() return m:call("get_Param") end)
+    local id = param and try(function() return param:get_field("_ItemId") end)
+    local nm = id and ITEM_NAMES[id]
+    if nm and not ITEM_NAMES_APPLIED[id] then
+      local item = try(function() return m:call("get_ItemData") end)
+      if item then
+        local ptr = try(function() return sdk.to_int64(item) end)
+        if ptr then NAME_MAP[ptr] = nm end
+        ITEM_NAMES_APPLIED[id] = true
+      end
+    end
+  end
+end
+
+local function elem_store_save()
+  local lines = {}
+  for k, v in pairs(ELEM_STORE) do lines[#lines + 1] = k .. "=" .. tostring(v) end
+  wr(DIR .. "elemstore.txt", table.concat(lines, "\n"))
+end
+local function install_elem_store_hook()
+  local td = sdk.find_type_definition("app.ItemDefine.StorageData")
+  local m = td and find_method(td, "makeEnhancedParam", {})
+  if not m then ELEM_DIAG.install_status = "no method" log.info(TAG .. "elemstore: makeEnhancedParam not found") return end
+  -- makeEnhancedParam returns a large struct, so the game passes a hidden
+  -- return-buffer pointer that shifts `this` from args[2] to args[3].
+  -- Scan args[2..3] once for the StorageData (has _StorageId) and the
+  -- return buffer (has _ElementStore), then cache the indices.
+  local function find_indices(args)
+    if ELEM_DIAG.this_idx and ELEM_DIAG.sret_idx then return ELEM_DIAG.this_idx, ELEM_DIAG.sret_idx end
+    local ti, si = nil, nil
+    for i = 2, 3 do
+      local a = args[i]
+      if a ~= nil then
+        local obj = try(function() return sdk.to_managed_object(a) end)
+        if obj then
+          if type(try(function() return obj:get_field("_StorageId") end)) == "number" then ti = i end
+          if type(try(function() return obj:get_field("_ElementStore") end)) == "number" then si = i end
+        end
+      end
+      if ti and si then break end
+    end
+    if ti then ELEM_DIAG.this_idx = ti end
+    if si then ELEM_DIAG.sret_idx = si end
+    return ti, si
+  end
+  local ok = pcall(sdk.hook, m,
+    function(args)
+      local st = thread.get_hook_storage()
+      st.elem_pct = nil
+      st.elem_buf = nil
+      do
+        local parts = {}
+        for i = 1, 4 do
+          local a = args[i]
+          local raw = a ~= nil and tostring(try(function() return sdk.to_int64(a) end)) or "nil"
+          local tn = "nil"
+          if a ~= nil then
+            local obj = try(function() return sdk.to_managed_object(a) end)
+            if obj then tn = tostring(try(function()
+              local td = obj:get_type_definition()
+              return td and td:get_full_name()
+            end)) end
+          end
+          parts[#parts + 1] = i .. ":" .. raw .. ":" .. tn
+        end
+        ELEM_DIAG.last_args = table.concat(parts, " ; ")
+      end
+      local ti, si = find_indices(args)
+      local sd = ti and try(function() return sdk.to_managed_object(args[ti]) end)
+      local key = sd and elem_store_key(sd)
+      ELEM_DIAG.pre_calls = ELEM_DIAG.pre_calls + 1
+      ELEM_DIAG.last_key = key or "(nil)"
+      if key and ELEM_STORE[key] then
+        ELEM_DIAG.matched = ELEM_DIAG.matched + 1
+        st.elem_pct = ELEM_STORE[key]
+        if si then st.elem_buf = try(function() return sdk.to_managed_object(args[si]) end) end
+      end
+    end,
+    function(retval)
+      local st = thread.get_hook_storage()
+      local pct = st.elem_pct
+      local buf = st.elem_buf
+      st.elem_pct = nil
+      st.elem_buf = nil
+      if pct ~= nil then
+        local done = false
+        if buf then done = pcall(function() buf:set_field("_ElementStore", pct) end) end
+        if not done then
+          local ep = try(function() return sdk.to_managed_object(retval) end)
+          if ep then done = pcall(function() ep:set_field("_ElementStore", pct) end) end
+        end
+        if done then ELEM_DIAG.post_sets = ELEM_DIAG.post_sets + 1 end
+      end
+      return retval
+    end)
+  if not ok then ELEM_DIAG.install_status = "hook failed" log.info(TAG .. "elemstore: hook install failed") end
+  if ok then ELEM_DIAG.installed = true ELEM_DIAG.install_status = "ok" end
+end
+
+elem_store_load()
+pcall(install_elem_store_hook)
+
+local CALC_DIAG = { calls = 0, sets = 0 }
+local GE_DIAG = { calls = 0 }
+local function install_calc_hook()
+  local td = sdk.find_type_definition("app.EquipData")
+  local m = td and find_method(td, "calc", {})
+  if not m then log.info(TAG .. "calc hook: method not found") return end
+  local ok = pcall(sdk.hook, m,
+    function(args)
+      local st = thread.get_hook_storage()
+      st.calc_ed = try(function() return sdk.to_managed_object(args[2]) end)
+    end,
+    function(retval)
+      local st = thread.get_hook_storage()
+      local ed = st.calc_ed
+      st.calc_ed = nil
+      CALC_DIAG.calls = CALC_DIAG.calls + 1
+      if ed then
+        local equips = try(function() return ed:get_field("Equips") end)
+        local els = equips and elems_of(equips)
+        if els then
+          for _, el in ipairs(els) do
+            local key = elem_store_key(el)
+            local over = key and ELEM_STORE[key]
+            if over then
+              local eqp = try(function() return ed:get_field("_EqParam") end)
+              if eqp and pcall(function() eqp:set_field("_ElementStore", over) end) then
+                CALC_DIAG.sets = CALC_DIAG.sets + 1
+              end
+              break
+            end
+          end
+        end
+      end
+      return retval
+    end)
+  if ok then log.info(TAG .. "calc hook installed") end
+end
+pcall(install_calc_hook)
+local function install_ge_hook()
+  local td = sdk.find_type_definition("app.EquipParam")
+  local m = td and find_method(td, "get_ElementStore", {})
+  if not m then return end
+  pcall(sdk.hook, m, nil, function(retval)
+    GE_DIAG.calls = GE_DIAG.calls + 1
+    return retval
+  end)
+end
+pcall(install_ge_hook)
+local function install_wes_hook()
+  local td = sdk.find_type_definition("app.ItemWeaponParam")
+  local m = td and find_method(td, "get_ElementStore", {})
+  if not m then log.info(TAG .. "wes hook: method not found") return end
+  local ok = pcall(sdk.hook, m,
+    function(args)
+      local st = thread.get_hook_storage()
+      st.wes_this = try(function() return sdk.to_int64(args[2]) end)
+    end,
+    function(retval)
+      local st = thread.get_hook_storage()
+      local this_ptr = st.wes_this
+      st.wes_this = nil
+      WES_DIAG.calls = WES_DIAG.calls + 1
+      if this_ptr ~= nil and ELEM_ACTIVE_PTR ~= nil and this_ptr == ELEM_ACTIVE_PTR
+          and ELEM_ACTIVE_PCT ~= nil then
+        WES_DIAG.applied = WES_DIAG.applied + 1
+        return ELEM_ACTIVE_PCT
+      end
+      return retval
+    end)
+  if ok then log.info(TAG .. "wes hook installed") end
+end
+pcall(install_wes_hook)
+
+-- "computed|override" ; override "" if none
+COMMANDS.item_get_elem_store = function(a)
+  local r = row_of(a[1])
+  local param = try(function() return r.master:call("get_Param") end)
+  local enh = param and try(function() return param:call("makeEnhancedParam") end)
+  local computed = enh and try(function() return enh:get_field("_ElementStore") end) or 0
+  local key = param and elem_store_key(param)
+  local over = key and ELEM_STORE[key]
+  return tostring(computed) .. "|" .. (over ~= nil and tostring(over) or "")
+end
+
+-- args: row, pct ("clear" to remove override, or a number)
+COMMANDS.item_type_probe = function(a)
+  local r = row_of(a[1])
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("could not read item data") end
+  local td = try(function() return item:get_type_definition() end)
+  if not td then error("no type definition") end
+  local tname = try(function() return td:get_full_name() end) or "?"
+  local ms = try(function() return td:get_methods() end) or {}
+  local out = { "type|" .. tname, "methods|" .. tostring(#ms) }
+  for _, m in ipairs(ms) do
+    local mn = try(function() return m:get_name() end) or ""
+    if mn:lower():find("name") then
+      local pt = try(function() return m:get_param_types() end)
+      out[#out + 1] = mn .. "(" .. (pt and tostring(#pt) or "?") .. ")"
+    end
+  end
+  return table.concat(out, " // ")
+end
+COMMANDS.item_name_diag = function(a)
+  local mapn, namesn = 0, 0
+  for _ in pairs(NAME_MAP) do mapn = mapn + 1 end
+  for _ in pairs(ITEM_NAMES) do namesn = namesn + 1 end
+  return string.format("installed|%s|status|%s|type|%s|calls|%d|matched|%d|id_field|%s|seen_id|%s|seen_ptr|%s|map|%d|names|%d",
+    tostring(NAME_DIAG.installed), tostring(NAME_DIAG.status), tostring(NAME_DIAG.type_name), NAME_DIAG.calls, NAME_DIAG.matched,
+    tostring(NAME_DIAG.id_field), tostring(NAME_DIAG.seen_id), tostring(NAME_DIAG.seen_ptr), mapn, namesn)
+end
+COMMANDS.item_get_name = function(a)
+  local r = row_of(a[1])
+  local item = try(function() return r.master:call("get_ItemData") end)
+  local cur = item and try(function() return item:call("get_Name") end) or "?"
+  local param = try(function() return r.master:call("get_Param") end)
+  local id = param and try(function() return param:get_field("_ItemId") end)
+  local custom = id and ITEM_NAMES[id] or nil
+  return clean(cur) .. "|" .. (custom or "")
+end
+COMMANDS.item_set_name = function(a)
+  local r = row_of(a[1])
+  local name = a[2] or ""
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("could not read item data") end
+  local param = try(function() return r.master:call("get_Param") end)
+  local id = param and try(function() return param:get_field("_ItemId") end)
+  if not id then error("could not identify item") end
+  if name == "clear" or name == "" then
+    ITEM_NAMES[id] = nil
+    ITEM_NAMES_APPLIED[id] = nil
+    do
+      local ptr = try(function() return sdk.to_int64(item) end)
+      if ptr then NAME_MAP[ptr] = nil end
+    end
+    item_names_save()
+    return "custom name cleared (restart the game to restore the original name)"
+  end
+  name = clean_name(name)
+  if name == "" then error("name is empty") end
+  do
+    local ptr = try(function() return sdk.to_int64(item) end)
+    if ptr then NAME_MAP[ptr] = name end
+  end
+  ITEM_NAMES[id] = name
+  ITEM_NAMES_APPLIED[id] = true
+  item_names_save()
+  return 'Item renamed to "' .. name .. '" (renames all items of this type)'
+end
+COMMANDS.item_set_elem_store = function(a)
+  local r = row_of(a[1])
+  local param = try(function() return r.master:call("get_Param") end)
+  if not param then error("could not read storage data") end
+  local key = elem_store_key(param)
+  if not key then error("could not identify item") end
+  local v = a[2]
+  if v == "clear" or v == "" then
+    ELEM_STORE[key] = nil
+  else
+    local pct = int(v)
+    if pct < 0 then error("element % cannot be negative") end
+    ELEM_STORE[key] = pct
+  end
+  elem_store_save()
+  do
+    local item = try(function() return r.master:call("get_ItemData") end)
+    local wp = item and try(function() return item:call("get_WeaponParam") end)
+    if wp and ELEM_STORE[key] ~= nil then
+      ELEM_ACTIVE_PTR = try(function() return sdk.to_int64(wp) end)
+      ELEM_ACTIVE_PCT = ELEM_STORE[key]
+    else
+      ELEM_ACTIVE_PTR = nil
+      ELEM_ACTIVE_PCT = nil
+    end
+  end
+  return full_apply(r.master)
+end
+
+-- "installed|status|preCalls|matched|lastKey|itemKey|override|computed|eqStorageId"
+-- Snapshot of hook counters is taken BEFORE this command's own
+-- makeEnhancedParam call, so lastKey shows what the GAME computed on.
+-- args: row. Dumps EquipData fields + Equips elements, flagging any object
+-- holding _ElementStore (a cached EquipParam), then calc() + re-check.
+COMMANDS.item_equipdata_probe = function(a)
+  local r = row_of(a[1])
+  local key = cur_key()
+  local lines = {}
+  local function add(s) lines[#lines + 1] = s end
+  local m = im()
+  if not m then error("ItemManager not available") end
+  local ro = try(function() return m:call("getEquipData", key) end)
+  if not ro then error("getEquipData returned nil") end
+  local ed = try(function() return ro:get_field("Data") end)
+  if not ed then error("ro.Data nil") end
+  add("== EquipData type: " .. tostring(try(function()
+    local td = ed:get_type_definition() return td and td:get_full_name() end)) .. " ==")
+  local function dump_obj(tag, obj, depth)
+    local td = try(function() return obj:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local n = try(function() return f:get_name() end)
+      if n then
+        local v = try(function() return obj:get_field(n) end)
+        local extra = ""
+        if type(v) == "userdata" then
+          local es = try(function() return v:get_field("_ElementStore") end)
+          if es ~= nil then extra = "  <-- HAS _ElementStore=" .. tostring(es) end
+          local vtd = try(function()
+            local t2 = v:get_type_definition() return t2 and t2:get_full_name() end)
+          if vtd then extra = extra .. " [" .. tostring(vtd) .. "]" end
+        end
+        add(string.rep("  ", depth) .. n .. " = " .. tostring(v) .. " (" .. type(v) .. ")" .. extra)
+      end
+    end
+  end
+  add("-- EquipData fields --")
+  dump_obj("ed", ed, 0)
+  add("-- Equips elements --")
+  local equips = try(function() return ed:get_field("Equips") end)
+  local els = equips and elems_of(equips)
+  add("Equips n=" .. tostring(els and #els or "?"))
+  if els then
+    for i, el in ipairs(els) do
+      local sid = try(function() return el:get_field("_StorageId") end)
+      add("Equips[" .. (i - 1) .. "] _StorageId=" .. tostring(sid))
+      dump_obj("el", el, 1)
+    end
+  end
+  add("-- ArisenWeapons elements --")
+  local aw = try(function() return ed:get_field("ArisenWeapons") end)
+  local awels = aw and elems_of(aw)
+  add("ArisenWeapons n=" .. tostring(awels and #awels or "?"))
+  if awels then
+    for i, el in ipairs(awels) do
+      add("ArisenWeapons[" .. (i - 1) .. "]")
+      dump_obj("aw", el, 1)
+    end
+  end
+  add("-- after calc() --")
+  local pre_before, mat_before = ELEM_DIAG.pre_calls, ELEM_DIAG.matched
+  local ok_calc = pcall(function() ed:call("calc") end)
+  add("calc ok=" .. tostring(ok_calc))
+  add("hook calls during calc=" .. tostring(ELEM_DIAG.pre_calls - pre_before)
+    .. " matched=" .. tostring(ELEM_DIAG.matched - mat_before))
+  local td2 = try(function() return ed:get_type_definition() end)
+  for _, f in ipairs(td2 and try(function() return td2:get_fields() end) or {}) do
+    local n = try(function() return f:get_name() end)
+    if n then
+      local v = try(function() return ed:get_field(n) end)
+      if type(v) == "userdata" then
+        local es = try(function() return v:get_field("_ElementStore") end)
+        if es ~= nil then add("  " .. n .. " _ElementStore=" .. tostring(es)) end
+      end
+    end
+  end
+  if not wr(DIR .. "equipdata.txt", table.concat(lines, "\n")) then error("could not write equipdata.txt") end
+  return "wrote equipdata.txt (" .. #lines .. " lines)"
+end
+
+-- args: none. Lists methods on item types matching Param/Element/Calc/Enhance.
+COMMANDS.item_methods_probe = function(a)
+  local lines = {}
+  local function add(s) lines[#lines + 1] = s end
+  for _, tname in ipairs({ "app.ItemDefine.StorageData", "app.EquipData",
+      "app.ItemDefine.EquipmentAbilityParam", "app.ItemWeaponParam",
+      "app.ItemArmorParam", "app.EquipParam", "app.ItemManager" }) do
+    add("== " .. tname .. " ==")
+    local td = sdk.find_type_definition(tname)
+    if not td then add("(type not found)") else
+      for _, m in ipairs(try(function() return td:get_methods() end) or {}) do
+        local n = try(function() return m:get_name() end) or ""
+        if n:find("Param") or n:find("Element") or n:find("Calc") or n:find("calc")
+            or n:find("Enhance") or n:find("enhance") then
+          local rt = try(function()
+            local t = m:get_return_type() return t and t:get_full_name() end)
+          local pc = try(function() return m:get_num_params() end)
+          add("  " .. n .. " -> " .. tostring(rt) .. " params=" .. tostring(pc))
+        end
+      end
+    end
+  end
+  if not wr(DIR .. "methods.txt", table.concat(lines, "\n")) then error("could not write methods.txt") end
+  return "wrote methods.txt (" .. #lines .. " lines)"
+end
+
+-- args: row. Dumps ALL fields of the item's _ItemData (ItemWeaponParam /
+-- ItemArmorParam) and of ItemManager's ItemParameters, to find the field
+-- holding the displayed element % (50).
+COMMANDS.item_weaponparam_probe = function(a)
+  local r = row_of(a[1])
+  local lines = {}
+  local function add(s) lines[#lines + 1] = s end
+  local item = try(function() return r.master:call("get_ItemData") end)
+  if not item then error("could not read item data") end
+  add("== _ItemData (get_ItemData) ==")
+  local td = try(function() return item:get_type_definition() end)
+  add("type=" .. tostring(td and try(function() return td:get_full_name() end)))
+  for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+    local n = try(function() return f:get_name() end)
+    if n then
+      local v = try(function() return item:get_field(n) end)
+      add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+    end
+  end
+  local wp = try(function() return item:call("get_WeaponParam") end)
+  if wp then
+    add("== WeaponParam (get_WeaponParam) ==")
+    local td2 = try(function() return wp:get_type_definition() end)
+    add("type=" .. tostring(td2 and try(function() return td2:get_full_name() end)))
+    for _, f in ipairs(td2 and try(function() return td2:get_fields() end) or {}) do
+      local n = try(function() return f:get_name() end)
+      if n then
+        local v = try(function() return wp:get_field(n) end)
+        add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+      end
+    end
+  else add("== WeaponParam: (none - not a weapon) ==") end
+  local m = im()
+  if m then
+    local ip = try(function() return m:call("getItemParameters") end)
+    if ip then
+      add("== ItemManager.ItemParameters ==")
+      local td3 = try(function() return ip:get_type_definition() end)
+      add("type=" .. tostring(td3 and try(function() return td3:get_full_name() end)))
+      for _, f in ipairs(td3 and try(function() return td3:get_fields() end) or {}) do
+        local n = try(function() return f:get_name() end)
+        if n and (n:find("lement") or n:find("Element")) then
+          local v = try(function() return ip:get_field(n) end)
+          add(n .. " = " .. tostring(v) .. " (" .. type(v) .. ")")
+        end
+      end
+    end
+  end
+  if not wr(DIR .. "weaponparam.txt", table.concat(lines, "\n")) then error("could not write weaponparam.txt") end
+  return "wrote weaponparam.txt (" .. #lines .. " lines)"
+end
+
+COMMANDS.item_elem_diag = function(a)
+  local r = row_of(a[1])
+  local snap_pre, snap_matched, snap_last, snap_args = ELEM_DIAG.pre_calls, ELEM_DIAG.matched, ELEM_DIAG.last_key, ELEM_DIAG.last_args
+  local param = try(function() return r.master:call("get_Param") end)
+  local key = param and elem_store_key(param)
+  local over = key and ELEM_STORE[key]
+  local enh = param and try(function() return param:call("makeEnhancedParam") end)
+  local computed = enh and try(function() return enh:get_field("_ElementStore") end)
+  local ed, el = equipped_copy(r.master, cur_key())
+  local eq_sid = el and try(function() return el:get_field("_StorageId") end)
+  local out = table.concat({
+    ELEM_DIAG.installed and "1" or "0", ELEM_DIAG.install_status,
+    tostring(snap_pre), tostring(snap_matched), tostring(snap_last),
+    tostring(key), over ~= nil and tostring(over) or "",
+    tostring(computed), tostring(eq_sid),
+    tostring(ELEM_DIAG.this_idx), tostring(ELEM_DIAG.sret_idx),
+    tostring(ELEM_DIAG.post_sets), tostring(snap_args),
+    tostring(CALC_DIAG.calls), tostring(CALC_DIAG.sets),
+    tostring(GE_DIAG.calls),
+    tostring(WES_DIAG.calls), tostring(WES_DIAG.applied) }, "|")
+  ELEM_DIAG.pre_calls, ELEM_DIAG.matched, ELEM_DIAG.post_sets = 0, 0, 0
+  ELEM_DIAG.last_key, ELEM_DIAG.last_args = nil, nil
+  CALC_DIAG.calls, CALC_DIAG.sets, GE_DIAG.calls = 0, 0, 0
+  WES_DIAG.calls, WES_DIAG.applied = 0, 0
+  return out
 end
 
 local function item_params(master)
@@ -3717,83 +4531,104 @@ COMMANDS.respawn_clear = function(a)
   local day0 = try(function() return tm:get_InGameDay() end)
   L("day before: " .. tostring(day0))
 
-  -- 1. look for a direct time-skip / set method
-  local td = try(function() return sdk.find_type_definition("app.TimeManager") end)
-  local tried = {}
-  if td then
-    for _, m in ipairs(td:get_methods() or {}) do
-      local n = try(function() return m:get_name() end) or ""
-      local l = n:lower()
-      if (l:find("skip", 1, true) or l:find("advanc", 1, true)
-          or l:find("settime", 1, true) or l:find("addtime", 1, true)
-          or l:find("fastforward", 1, true))
-         and not l:find("get", 1, true) then
-        tried[#tried + 1] = n
-        L("candidate: " .. n)
-      end
-    end
-  end
-
-  -- 2. try common time-skip signatures (72h), most promising first
   local done = false
-  local attempts = {
-    { "skipTime", { 72.0 } }, { "SkipTime", { 72.0 } },
-    { "advanceTime", { 72.0 } }, { "addTime", { 72.0 } },
-    { "setInGameHour", { 72.0 } },
-  }
-  for _, at in ipairs(attempts) do
-    local name, args = at[1], at[2]
-    local ok = pcall(function()
-      local m = td and td:get_method(name)
-      if not m then error("no method") end
-      tm:call(name, table.unpack(args))
+  -- 1. engine time-skip via direct field write. The clock is plain data
+  -- (TimeManager._TimeData.<InGameDay>k__BackingField); no method
+  -- preconditions to violate. Write + read-back verify.
+  local tsm = try(function() return sdk.get_managed_singleton("app.TimeSkipManager") end)
+  if tsm then
+    local ok, msg = pcall(function()
+      local tm2 = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
+      if not tm2 then error("no TimeManager") end
+      local day0 = tm2:get_InGameDay()
+      if not day0 then error("no day") end
+      local tdata = tm2:get_field("_TimeData")
+      if not tdata then error("no _TimeData") end
+      local fname = "<InGameDay>k__BackingField"
+      local target = day0 + 3
+      local function try_write(obj)
+        if not obj then return false end
+        local wok = pcall(function() obj:set_field(fname, target) end)
+        if not wok then
+          local fdef = try(function()
+            return obj:get_type_definition():get_field(fname) end)
+          if fdef then wok = pcall(function() fdef:set_data(obj, target) end) end
+        end
+        local rb = try(function() return obj:get_field(fname) end)
+        return wok and rb == target
+      end
+      local ok1 = try_write(tdata)
+      local tlook = tm2:get_field("_TimeDataLook")
+      local ok2 = try_write(tlook)
+      -- _DetectionCacheDay lives on TimeManager itself (different field name)
+      local dcok = pcall(function() tm2:set_field("_DetectionCacheDay", target) end)
+      local dcrb = try(function() return tm2:get_field("_DetectionCacheDay") end)
+      if ok1 then
+        return "OK day " .. tostring(day0) .. " -> " .. tostring(target) ..
+          " (timedata=" .. tostring(ok1) ..
+          " look=" .. tostring(ok2) ..
+          " cache=" .. tostring(dcok and dcrb == target) .. ")"
+      else
+        error("write did not stick")
+      end
     end)
-    if ok then L("called " .. name .. "(72)"); done = true; break end
+    if ok then
+      L("engine time-skip: " .. tostring(msg) .. " (field write, no teleport)")
+      L("check the in-game clock - corpses should clear as time catches up")
+      done = true
+    else
+      L("engine time-skip failed: " .. tostring(msg):sub(1, 120))
+    end
+  else
+    L("TimeSkipManager not found")
   end
 
-  -- 3. fallback: bump likely backing fields directly
-  if not done and td then
-    for _, f in ipairs(td:get_fields() or {}) do
-      local n = try(function() return f:get_name() end) or ""
-      local l = n:lower()
-      if l:find("elapsed", 1, true) and (l:find("hour", 1, true) or l:find("time", 1, true)) then
-        local v = try(function() return tm:get_field(n) end)
-        if type(v) == "number" then
-          pcall(function() tm:set_field(n, v + 72.0) end)
-          L("field " .. n .. ": " .. tostring(v) .. " -> " .. tostring(v + 72.0))
-          done = true
-          break
-        end
-      end
+  -- 2. fallback: old TimeManager guessing
+  if not done then
+    local td = try(function() return sdk.find_type_definition("app.TimeManager") end)
+    local attempts = {
+      { "skipTime", { 72.0 } }, { "SkipTime", { 72.0 } },
+      { "advanceTime", { 72.0 } }, { "addTime", { 72.0 } },
+    }
+    for _, at in ipairs(attempts) do
+      local name, args = at[1], at[2]
+      local ok = pcall(function()
+        local m = td and td:get_method(name)
+        if not m then error("no method") end
+        tm:call(name, table.unpack(args))
+      end)
+      if ok then L("called " .. name .. "(72)"); done = true; break end
     end
   end
 
   local day1 = try(function() return tm:get_InGameDay() end)
-  L("day after: " .. tostring(day1))
+  L("day after (immediate read): " .. tostring(day1))
   if not done then
-    L("no time-skip API found - rest at a camp/inn to advance time instead")
+    L("no working time-skip found - rest at a camp/inn to advance time instead")
   end
   return table.concat(lines, " | ")
 end
 
 ---------------------------------------------------------------- v1.24: fast travel (FastTravelAnywhere core, no hotkeys/UI)
 -- Engine warp via TimeSkipManager.requestPlayerWarp: clean sector streaming and
--- pawn party teleportation. 6s post-warp fall-damage immunity. Altitude modes:
--- "fixed" = pins drop from altitude, landmarks land near ground; "offset" =
--- land <alt> meters above the destination.
-local FT_INVULN_UNTIL = 0
+-- pawn party teleportation. 6s post-warp fall protection: forces the Jump tab's
+-- no-fall-damage field patching on for 6s (saving/restoring the user's setting),
+-- plus a skip-hook on the fall-damage handler if it can be found.
+-- Altitude modes: "fixed" = pins drop from altitude, landmarks land near ground;
+-- "offset" = land <alt> meters above the destination.
+local FT = { protect_until = 0, forced = false, saved = nil, hook_ok = false, last_path = "never" }
 do
   local td = try(function() return sdk.find_type_definition("app.Human") end)
   local m = td and try(function() return td:get_method("Chara_DamageFromFallHandler(System.Single)") end)
   if m then
-    pcall(sdk.hook, m, function(args)
-      if os.clock() < FT_INVULN_UNTIL then
+    FT.hook_ok = pcall(sdk.hook, m, function(args)
+      if os.clock() < FT.protect_until then
         return sdk.PreHookResult.SKIP_ORIGINAL
       end
     end, nil)
-    log.info(TAG .. "fast travel: 6s post-warp fall immunity hook installed")
+    log.info(TAG .. "fast travel: fall-damage hook " .. (FT.hook_ok and "installed" or "FAILED"))
   else
-    log.info(TAG .. "fast travel: fall handler NOT FOUND (no grace period)")
+    log.info(TAG .. "fast travel: fall handler NOT FOUND (patch-only protection)")
   end
 end
 
@@ -3819,13 +4654,41 @@ end
 local function ft_icon_pos()
   local g = ft_gui_mgr()
   if g then
-    local list = try(function() return g:get_field("_MapPinList_k__BackingField") end)
+    local list = try(function() return g:get_field("<MapPinList>k__BackingField") end)
+      or try(function() return g:call("get_MapPinList") end)
     local n = (list and try(function() return list:get_Count() end)) or 0
     if n > 0 then
-      local icon = try(function() return list:get_Item(0) end)
-      local pos = icon and (try(function() return icon:get_field("Pos") end)
-        or try(function() return icon:get_field("Position") end))
-      if pos then return pos, "pin" end
+      -- most recently placed pin first; skip ones with empty positions.
+      -- <MapPinList> is MapIconInfo[] (array): use Get, not get_Item.
+      local function get_pin(i)
+        return try(function() return list:call("GetValue", i) end)
+          or try(function() return list:call("Get", i) end)
+          or try(function() return list:get_Item(i) end)
+      end
+      -- the game flags the user's active pin with IsEnable=true;
+      -- index order is meaningless, so find the enabled one
+      for i = 0, n - 1 do
+        local icon = get_pin(i)
+        local enabled = icon and try(function() return icon:get_field("IsEnable") end)
+        if enabled then
+          local pos = try(function() return icon:get_field("Pos") end)
+            or try(function() return icon:get_field("Position") end)
+          if pos and not (pos.x == 0 and pos.z == 0) then
+            FT.pin_index = i
+            return pos, "pin"
+          end
+        end
+      end
+      -- fallback: first pin with a valid position
+      for i = 0, n - 1 do
+        local icon = get_pin(i)
+        local pos = icon and (try(function() return icon:get_field("Pos") end)
+          or try(function() return icon:get_field("Position") end))
+        if pos and not (pos.x == 0 and pos.z == 0) then
+          FT.pin_index = i
+          return pos, "pin"
+        end
+      end
     end
   end
   if FT_UI then
@@ -3841,7 +4704,9 @@ local function ft_quest_pos()
   local g = ft_gui_mgr()
   if not g then return nil end
   return try(function()
-    local ml = g:get_QuestTargetMarkerList()
+    local ml = g:get_field("QuestTargetMarkerList")
+      or g:call("getQuestTargetMarkerList")
+      or g:get_QuestTargetMarkerList()
     if not ml or ml:get_Count() == 0 then return nil end
     local mk = ml:get_Item(0)
     local pos = mk and mk.Pos
@@ -3859,12 +4724,20 @@ local function ft_warp(pos, kind, mode, alt)
   local ty
   if mode == "offset" then
     ty = (pos.y or 0) + alt
-  elseif kind == "landmark" or (pos.y and pos.y >= 35.0) then
+  elseif pos.y and pos.y >= 35.0 then
+    -- real altitude (quest markers, valid pins): land just above it
     ty = pos.y + 5.0
   else
-    ty = math.min(math.max(alt, 100.0), 2000.0)
+    -- no valid altitude (map pins have y=0): drop from high above the
+    -- tallest terrain. 6s fall protection lands us safely.
+    ty = math.min(math.max(alt, 800.0), 2000.0)
   end
-  FT_INVULN_UNTIL = os.clock() + 6.0
+  -- protection window scales with drop height (800m needs ~13s)
+  local protect_secs = 6.0
+  if not (pos.y and pos.y >= 35.0) and mode ~= "offset" then
+    protect_secs = math.min(6.0 + math.max(0, ty - 300.0) / 100.0, 25.0)
+  end
+  FT.protect_until = os.clock() + protect_secs
   local tsm = try(function() return sdk.get_managed_singleton("app.TimeSkipManager") end)
   local tm = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
   if tsm and tm then
@@ -3879,7 +4752,10 @@ local function ft_warp(pos, kind, mode, alt)
       local rot = transform and try(function() return transform:get_Rotation() end)
       tsm:call("requestPlayerWarp", hr, mn, dy, upos, rot, nil, true, true)
     end)
-    if ok then return string.format("warped to (%.1f, %.1f, %.1f) [6s fall immunity]", pos.x, ty, pos.z) end
+    if ok then
+      FT.last_path = "engine"
+      return string.format("warped to (%.1f, %.1f, %.1f) [pin#%s 6s fall protection: %s]", pos.x, ty, pos.z, tostring(FT.pin_index), FT.hook_ok and "hook+patch" or "patch")
+    end
   end
   local transform = try(function() return player:get_Transform() end)
   if not transform then error("warp failed (no TimeSkipManager, no transform)") end
@@ -3887,7 +4763,8 @@ local function ft_warp(pos, kind, mode, alt)
     transform:set_Position(Vector3f.new(pos.x, ty, pos.z))
   end)
   if not ok then error("warp failed") end
-  return string.format("moved to (%.1f, %.1f, %.1f) [direct, 6s fall immunity]", pos.x, ty, pos.z)
+  FT.last_path = "direct"
+  return string.format("moved to (%.1f, %.1f, %.1f) [pin#%s direct, 6s fall protection: %s]", pos.x, ty, pos.z, tostring(FT.pin_index), FT.hook_ok and "hook+patch" or "patch")
 end
 
 -- args: mode ("fixed"/"offset"), altitude-or-offset
@@ -3903,10 +4780,486 @@ COMMANDS.warp_to_quest = function(a)
   return ft_warp(pos, "landmark", a[1], a[2])
 end
 
+---------------------------------------------------------------- v1.41 warp probe
+-- Diagnostics for fast travel: fall-hook status, TimeSkipManager presence,
+-- requestPlayerWarp found/not-found, interesting TimeSkipManager methods,
+-- full field dumps of the first map pin and quest marker (to find the true
+-- altitude field), and which warp path the last warp took.
+COMMANDS.warp_probe = function()
+  local out = {}
+  local function L(x) out[#out + 1] = x end
+  L("fall hook: " .. (FT.hook_ok and "installed" or "NOT FOUND"))
+  local tsm = try(function() return sdk.get_managed_singleton("app.TimeSkipManager") end)
+  local tm = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
+  L("TimeSkipManager: " .. (tsm and "yes" or "no"))
+  L("TimeManager: " .. (tm and "yes" or "no"))
+  L("last warp path: " .. FT.last_path)
+  if tsm then
+    local td = try(function() return tsm:get_type_definition() end)
+    local methods = (td and try(function() return td:get_methods() end)) or {}
+    local interesting = {}
+    for _, m in ipairs(methods) do
+      local mn = try(function() return m:get_name() end) or ""
+      local l = mn:lower()
+      if l:find("warp", 1, true) or l:find("skip", 1, true)
+        or (l:find("time", 1, true) and not l:find("get", 1, true)) then
+        interesting[#interesting + 1] = mn
+      end
+    end
+    L("TimeSkipManager methods (" .. #methods .. " total): " ..
+      (#interesting > 0 and table.concat(interesting, ", ") or "<none interesting>"))
+    local rp = td and try(function() return td:get_method("requestPlayerWarp") end)
+    L("requestPlayerWarp: " .. (rp and "found" or "NOT FOUND"))
+  end
+  local function dump_fields(obj, label, cap)
+    if type(obj) ~= "userdata" then L(label .. ": <nil>"); return end
+    local td = try(function() return obj:get_type_definition() end)
+    if not td then L(label .. ": <no typedef>"); return end
+    L(label .. " (" .. (try(function() return td:get_full_name() end) or "?") .. "):")
+    local n = 0
+    for _, f in ipairs(try(function() return td:get_fields() end) or {}) do
+      if n >= cap then break end
+      local fn = try(function() return f:get_name() end) or "?"
+      local v = try(function() return obj:get_field(fn) end)
+      local vs
+      if type(v) == "userdata" then
+        local vt = try(function() return v:get_type_definition() end)
+        vs = "<" .. (vt and try(function() return vt:get_full_name() end) or type(v)) .. ">"
+        local x = try(function() return v.x end)
+        if type(x) == "number" then
+          vs = vs .. string.format("(%.1f, %.1f, %.1f)",
+            x, try(function() return v.y end) or 0, try(function() return v.z end) or 0)
+        end
+      else
+        vs = tostring(v):sub(1, 60)
+      end
+      L("  " .. fn .. " = " .. vs)
+      n = n + 1
+    end
+  end
+  local g = try(function() return sdk.get_managed_singleton("app.GuiManager") end)
+  local list = g and (try(function() return g:get_field("<MapPinList>k__BackingField") end)
+    or try(function() return g:call("get_MapPinList") end))
+  local np = (list and try(function() return list:get_Count() end)) or 0
+  L("map pins: " .. np)
+  if np > 0 then dump_fields(try(function() return list:call("GetValue", np - 1) end), "pin[last]", 40) end
+  for i = 0, math.min(np, 8) - 1 do
+    local icon = try(function() return list:call("GetValue", i) end)
+      or try(function() return list:call("Get", i) end)
+      or try(function() return list:get_Item(i) end)
+    if type(icon) == "userdata" then
+      local itd = try(function() return icon:get_type_definition() end)
+      local bits = {}
+      for _, f in ipairs((itd and try(function() return itd:get_fields() end)) or {}) do
+        local fn = try(function() return f:get_name() end) or ""
+        local l = fn:lower()
+        if l:find("pos", 1, true) or l:find("enable", 1, true) or l:find("active", 1, true)
+          or l:find("valid", 1, true) or l:find("visible", 1, true) or l:find("id", 1, true)
+          or l:find("time", 1, true) or l:find("no", 1, true) or l:find("index", 1, true)
+          or l:find("flag", 1, true) then
+          local v = try(function() return icon:get_field(fn) end)
+          local vs
+          if type(v) == "userdata" then
+            local x = try(function() return v.x end)
+            if type(x) == "number" then
+              vs = string.format("(%.1f, %.1f, %.1f)",
+                x, try(function() return v.y end) or 0, try(function() return v.z end) or 0)
+            else vs = "<userdata>" end
+          else
+            vs = tostring(v):sub(1, 40)
+          end
+          bits[#bits + 1] = fn .. "=" .. vs
+        end
+      end
+      L("pin[" .. i .. "] (" .. (itd and try(function() return itd:get_full_name() end) or "?") ..
+        "): " .. (#bits > 0 and table.concat(bits, ", ") or "<no pos/enable fields>"))
+    else
+      L("pin[" .. i .. "]: <nil>")
+    end
+  end
+  -- terrain height API hunt: is there any ground-height query?
+  do
+    local out2 = {}
+    for _, tn in ipairs({ "app.FieldManager", "via.physics.PhysicsWorld",
+        "app.TerrainManager", "via.Terrain" }) do
+      local td = try(function() return sdk.find_type_definition(tn) end)
+      if td then
+        local hm = {}
+        for _, m in ipairs(try(function() return td:get_methods() end) or {}) do
+          local mn = try(function() return m:get_name() end) or ""
+          local l = mn:lower()
+          if l:find("height", 1, true) or l:find("ground", 1, true)
+            or l:find("terrain", 1, true) or l:find("raycast", 1, true)
+            or l:find("ray", 1, true) then
+            hm[#hm + 1] = mn
+          end
+        end
+        out2[#out2 + 1] = tn .. ": " .. (#hm > 0 and table.concat(hm, ", ") or "no height methods")
+      else
+        out2[#out2 + 1] = tn .. ": type not found"
+      end
+    end
+    L("terrain API hunt: " .. table.concat(out2, " // "))
+  end
+  -- altitude discovery: hook setMapPin + hunt map-UI height methods
+  do
+    if not FT.pinhook then
+      local g2 = try(function() return sdk.get_managed_singleton("app.GuiManager") end)
+      local td2 = g2 and try(function() return g2:get_type_definition() end)
+      local sm = td2 and try(function() return td2:get_method("setMapPin") end)
+      if sm then
+        local okh = pcall(sdk.hook, sm, function(hargs)
+          if FT.pin_args then return end
+          local vals = {}
+          for i = 3, 8 do
+            local a = hargs[i]
+            if a == nil then break end
+            local iv = try(function() return sdk.to_int64(a) end)
+            local desc = "a" .. (i - 2) .. "=" .. tostring(iv)
+            if iv and iv > 65536 then
+              local mo = try(function() return sdk.to_managed_object(a) end)
+              local x = mo and try(function() return mo.x end)
+              if type(x) == "number" then
+                desc = desc .. string.format("(%.1f,%.1f,%.1f)", x,
+                  try(function() return mo.y end) or 0,
+                  try(function() return mo.z end) or 0)
+              end
+            end
+            vals[#vals + 1] = desc
+          end
+          FT.pin_args = table.concat(vals, " ")
+        end, nil)
+        FT.pinhook = okh and true or false
+        L("setMapPin hook: " .. (FT.pinhook and "installed" or "FAILED"))
+      else
+        L("setMapPin: method not found")
+      end
+    else
+      L("setMapPin hook: already installed")
+    end
+    L("setMapPin capture: " .. (FT.pin_args or
+      "none yet - place a pin on the map, then run this again"))
+    -- map UI height methods
+    local utd = try(function() return sdk.find_type_definition("app.ui040205") end)
+    if utd then
+      local hm = {}
+      for _, m in ipairs(try(function() return utd:get_methods() end) or {}) do
+        local mn = try(function() return m:get_name() end) or ""
+        local l = mn:lower()
+        if l:find("height", 1, true) or l:find("alt", 1, true)
+          or l:find("ground", 1, true) or l:find("terrain", 1, true)
+          or l:find("elevation", 1, true) then
+          hm[#hm + 1] = mn
+        end
+      end
+      L("ui040205 height methods: " .. (#hm > 0 and table.concat(hm, ", ") or "<none>"))
+    end
+  end
+  -- pin list type probe: why does get_Item return nil?
+  do
+    local ltd = list and try(function() return list:get_type_definition() end)
+    L("pin list type: " .. (ltd and try(function() return ltd:get_full_name() end) or "<nil>"))
+    local ok_it, it_err = pcall(function() return list:get_Item(0) end)
+    L("get_Item(0): ok=" .. tostring(ok_it) ..
+      " err=" .. (it_err and tostring(it_err):sub(1, 100) or "nil") ..
+      " valtype=" .. type(ok_it and it_err or nil))
+    if ltd then
+      local mns = {}
+      for _, m in ipairs(try(function() return ltd:get_methods() end) or {}) do
+        local mn = try(function() return m:get_name() end) or ""
+        if mn:lower():find("item") or mn:lower():find("get") or mn:lower():find("count") then
+          mns[#mns + 1] = mn
+        end
+      end
+      L("pin list accessors: " .. table.concat(mns, ", "))
+    end
+    if FT_UI then
+      local sel = try(function() return FT_UI:get_field("SelectedIcon") end)
+      if type(sel) == "userdata" then
+        local std = try(function() return sel:get_type_definition() end)
+        L("SelectedIcon (" .. (std and try(function() return std:get_full_name() end) or "?") .. "):")
+        for _, f in ipairs(try(function() return std:get_fields() end) or {}) do
+          local fn = try(function() return f:get_name() end) or ""
+          local l = fn:lower()
+          if l:find("pos", 1, true) or l:find("enable", 1, true) then
+            local v = try(function() return sel:get_field(fn) end)
+            local vs
+            if type(v) == "userdata" then
+              local x = try(function() return v.x end)
+              vs = type(x) == "number" and
+                string.format("(%.1f, %.1f, %.1f)", x,
+                  try(function() return v.y end) or 0,
+                  try(function() return v.z end) or 0) or "<userdata>"
+            else vs = tostring(v):sub(1, 40) end
+            L("  " .. fn .. " = " .. vs)
+          end
+        end
+      else
+        L("SelectedIcon: <nil>")
+      end
+    else
+      L("FT_UI: <nil>")
+    end
+  end
+  local ml = g and (try(function() return g:get_field("QuestTargetMarkerList") end)
+    or try(function() return g:call("getQuestTargetMarkerList") end)
+    or try(function() return g:get_QuestTargetMarkerList() end))
+  local nq = (ml and try(function() return ml:get_Count() end)) or 0
+  L("quest markers: " .. nq)
+  if nq > 0 then dump_fields(try(function() return ml:get_Item(0) end), "quest[0]", 40) end
+  -- deep scan: where do pins/markers really live?
+  L("FT_UI captured: " .. (FT_UI and "yes" or "no"))
+  local plfield = g and try(function() return g:get_field("_MapPinList_k__BackingField") end)
+  L("_MapPinList field type: " .. type(plfield))
+  local gtd = g and try(function() return g:get_type_definition() end)
+  if gtd then
+    local ff, mm = {}, {}
+    for _, f in ipairs(try(function() return gtd:get_fields() end) or {}) do
+      local fn = try(function() return f:get_name() end) or ""
+      local l = fn:lower()
+      if l:find("pin", 1, true) or l:find("marker", 1, true) or l:find("quest", 1, true) then
+        local v = try(function() return g:get_field(fn) end)
+        local d = type(v)
+        if type(v) == "userdata" then
+          local c = try(function() return v:get_Count() end)
+          if type(c) == "number" then d = d .. "[n=" .. c .. "]" end
+        elseif type(v) == "number" or type(v) == "string" or type(v) == "boolean" then
+          d = d .. "=" .. tostring(v):sub(1, 30)
+        end
+        ff[#ff + 1] = fn .. ":" .. d
+      end
+    end
+    local fj = table.concat(ff, ", ")
+    L("GuiManager pin/marker/quest fields (" .. #ff .. "): " ..
+      (#ff > 0 and fj:sub(1, 600) or "<none>"))
+    for _, m in ipairs(try(function() return gtd:get_methods() end) or {}) do
+      local mn = try(function() return m:get_name() end) or ""
+      local l = mn:lower()
+      if (l:find("marker", 1, true) and l:find("quest", 1, true)) or l:find("mappin", 1, true) then
+        mm[#mm + 1] = mn
+      end
+    end
+    L("GuiManager marker methods: " .. (#mm > 0 and table.concat(mm, ", ") or "<none>"))
+  end
+  for _, cname in ipairs({ "app.MapManager", "app.MapPinManager", "app.FieldManager" }) do
+    local so = try(function() return sdk.get_managed_singleton(cname) end)
+    L(cname .. ": " .. (type(so) == "userdata" and "exists" or "nil"))
+  end
+  return (table.concat(out, " // "):gsub("[|;\r\n\t]", " "))
+end
+
+---------------------------------------------------------------- v1.46 multi-hook time-skip probe
+-- Resting never called requestTimeSkip, so hook ALL time/warp methods of
+-- TimeSkipManager and see which one the rest flow actually uses. Run once
+-- to install, rest at an inn/camp, run again to read captures.
+local TSS = { hooked = false, hits = {} }
+local TSS_METHODS = { "requestTimeSkip", "setTime", "warpPlayer", "warp",
+  "onWarp", "requestPlayerWarp", "requestOxcartWarp" }
+local function tss_install()
+  if TSS.hooked then return "already installed" end
+  local tsm = try(function() return sdk.get_managed_singleton("app.TimeSkipManager") end)
+  if not tsm then return "TimeSkipManager not found" end
+  local td = try(function() return tsm:get_type_definition() end)
+  if not td then return "no typedef" end
+  local n = 0
+  for _, mn in ipairs(TSS_METHODS) do
+    local m = try(function() return td:get_method(mn) end)
+    if m then
+      local cb = (function(name)
+        return function(hargs)
+          if TSS.hits[name] then return end
+          local narr, vals = 0, {}
+          for i = 3, 10 do
+            local a = hargs[i]
+            if a == nil then break end
+            narr = narr + 1
+            local iv = try(function() return sdk.to_int64(a) end)
+            vals[#vals + 1] = "a" .. narr .. "=" .. tostring(iv)
+          end
+          TSS.hits[name] = narr .. " args: " .. table.concat(vals, " ")
+        end
+      end)(mn)
+      if pcall(sdk.hook, m, cb, nil) then n = n + 1 end
+    end
+  end
+  TSS.hooked = true
+  return n .. "/" .. #TSS_METHODS .. " hooks installed"
+end
+
+COMMANDS.timeskip_probe = function()
+  local out = {}
+  out[#out + 1] = "install: " .. tss_install()
+  local any = false
+  for _, mn in ipairs(TSS_METHODS) do
+    local h = TSS.hits[mn]
+    if h then any = true out[#out + 1] = "FIRED " .. mn .. " <- " .. h end
+  end
+  if not any then
+    out[#out + 1] = "nothing captured yet - rest at an inn/camp, then run this again"
+  end
+  return (table.concat(out, " // "):gsub("[|;\r\n\t]", " "))
+end
+
+---------------------------------------------------------------- v1.50 time-skip overload dump
+-- Lists EVERY overload of the time/warp methods from metadata (no invokes,
+-- no game-memory dereferencing). Run any time; no rest needed.
+COMMANDS.timeskip_sig = function()
+  local out = {}
+  local tsm = try(function() return sdk.get_managed_singleton("app.TimeSkipManager") end)
+  local td = tsm and try(function() return tsm:get_type_definition() end)
+  if not td then return "TimeSkipManager unavailable" end
+  local methods = try(function() return td:get_methods() end) or {}
+  for _, want in ipairs({ "setTime", "onWarp", "requestTimeSkip", "requestPlayerWarp" }) do
+    local found = 0
+    for _, m in ipairs(methods) do
+      local n = try(function() return m:get_name() end) or ""
+      if n == want then
+        found = found + 1
+        local pts = try(function() return m:get_param_types() end)
+        local pnames = {}
+        if pts then
+          for i = 1, #pts do
+            local pt = pts[i]
+            local pn = try(function() return pt:get_full_name() end) or "?"
+            if try(function() return pt:is_by_ref() end) then pn = pn .. "&" end
+            pnames[#pnames + 1] = pn
+          end
+        end
+        local rt = try(function() return m:get_return_type() end)
+        local rtn = (rt and try(function() return rt:get_full_name() end)) or "?"
+        local st = try(function() return m:is_static() end) and "[static] " or ""
+        out[#out + 1] = st .. n .. "(" .. table.concat(pnames, ", ") .. ") -> " .. rtn ..
+          (pts and "" or " [no param_types API]")
+      end
+    end
+    if found == 0 then out[#out + 1] = want .. ": not found" end
+  end
+  local extra = {}
+  for _, m in ipairs(methods) do
+    local n = try(function() return m:get_name() end) or ""
+    local ln = n:lower()
+    if (ln:find("time") or ln:find("day") or ln:find("skip")) and
+       n ~= "setTime" and n ~= "onWarp" and
+       n ~= "requestTimeSkip" and n ~= "requestPlayerWarp" then
+      extra[#extra + 1] = n
+    end
+  end
+  if #extra > 0 then
+    out[#out + 1] = "other time/day/skip methods: " .. table.concat(extra, ", ")
+  end
+  return (table.concat(out, " // "):gsub("[|;\r\n\t]", " "))
+end
+
+---------------------------------------------------------------- v1.51 time-manager field dump
+-- Read-only dump of TimeManager + TimeSkipManager fields (name, type,
+-- value). No invokes, no writes. Finds where the clock actually lives.
+COMMANDS.timemgr_dump = function()
+  local out = {}
+  for _, tn in ipairs({ "app.TimeManager", "app.TimeSkipManager" }) do
+    local o = try(function() return sdk.get_managed_singleton(tn) end)
+    if not o then
+      out[#out + 1] = tn .. ": singleton not found"
+    else
+      local td = try(function() return o:get_type_definition() end)
+      out[#out + 1] = "== " .. tn .. " =="
+      for _, f in ipairs(try(function() return td:get_fields() end) or {}) do
+        local fn = try(function() return f:get_name() end) or "?"
+        local ft = try(function() return f:get_type() end)
+        local ftn = (ft and try(function() return ft:get_full_name() end)) or "?"
+        local v = try(function() return f:get_data(o) end)
+        local vs
+        if type(v) == "string" then vs = string.format("%q", v)
+        elseif type(v) == "number" or type(v) == "boolean" then vs = tostring(v)
+        elseif v == nil then vs = "nil"
+        else
+          local mt = try(function() return v:get_type_definition() end)
+          vs = "<" .. tostring(mt and mt:get_full_name() or type(v)) .. ">"
+        end
+        if #vs > 80 then vs = vs:sub(1, 80) .. "..." end
+        out[#out + 1] = fn .. " : " .. ftn .. " = " .. vs
+      end
+    end
+  end
+  -- recurse into _TimeData (the live clock object)
+  do
+    local tm = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
+    local tdata = tm and try(function() return tm:get_field("_TimeData") end)
+    local td2 = tdata and try(function() return tdata:get_type_definition() end)
+    if td2 then
+      out[#out + 1] = "== app.TimeManager.TimeData =="
+      for _, f in ipairs(try(function() return td2:get_fields() end) or {}) do
+        local fn = try(function() return f:get_name() end) or "?"
+        local ft = try(function() return f:get_type() end)
+        local ftn = (ft and try(function() return ft:get_full_name() end)) or "?"
+        local v = try(function() return f:get_data(tdata) end)
+        local vs
+        if type(v) == "string" then vs = string.format("%q", v)
+        elseif type(v) == "number" or type(v) == "boolean" then vs = tostring(v)
+        elseif v == nil then vs = "nil"
+        else
+          local mt = try(function() return v:get_type_definition() end)
+          vs = "<" .. tostring(mt and mt:get_full_name() or type(v)) .. ">"
+        end
+        if #vs > 80 then vs = vs:sub(1, 80) .. "..." end
+        out[#out + 1] = fn .. " : " .. ftn .. " = " .. vs
+      end
+    else
+      out[#out + 1] = "_TimeData: not accessible"
+    end
+  end
+  -- recurse into _TimeDataLook (possible display copy of the clock)
+  do
+    local tm = try(function() return sdk.get_managed_singleton("app.TimeManager") end)
+    local tlook = tm and try(function() return tm:get_field("_TimeDataLook") end)
+    local td3 = tlook and try(function() return tlook:get_type_definition() end)
+    if td3 then
+      out[#out + 1] = "== app.TimeManager.TimeDataLook =="
+      for _, f in ipairs(try(function() return td3:get_fields() end) or {}) do
+        local fn = try(function() return f:get_name() end) or "?"
+        local ft = try(function() return f:get_type() end)
+        local ftn = (ft and try(function() return ft:get_full_name() end)) or "?"
+        local v = try(function() return f:get_data(tlook) end)
+        local vs
+        if type(v) == "string" then vs = string.format("%q", v)
+        elseif type(v) == "number" or type(v) == "boolean" then vs = tostring(v)
+        elseif v == nil then vs = "nil"
+        else
+          local mt = try(function() return v:get_type_definition() end)
+          vs = "<" .. tostring(mt and mt:get_full_name() or type(v)) .. ">"
+        end
+        if #vs > 80 then vs = vs:sub(1, 80) .. "..." end
+        out[#out + 1] = fn .. " : " .. ftn .. " = " .. vs
+      end
+    else
+      out[#out + 1] = "_TimeDataLook: not accessible"
+    end
+  end
+  return (table.concat(out, " // "):gsub("[|;\r\n\t]", " "))
+end
+
 ---------------------------------------------------------------- polling loop
 local last_poll, last_id = 0, nil
 
 re.on_frame(function()
+  -- 6s post-warp fall protection: force no-fall-damage patching, then restore
+  local now0 = os.clock()
+  if now0 < FT.protect_until then
+    if not FT.forced then
+      FT.forced = true
+      FT.saved = JUMP.nofall
+      if not JUMP.nofall then
+        JUMP.nofall = true
+        pcall(jump_apply)
+      end
+    end
+  elseif FT.forced then
+    FT.forced = false
+    if not FT.saved then
+      JUMP.nofall = false
+      pcall(jump_apply)
+    end
+    FT.saved = nil
+  end
   local now = os.clock()
   if now - last_poll < 0.1 then return end
   last_poll = now
@@ -3932,4 +5285,4 @@ re.on_frame(function()
 end)
 
 wr(DIR .. "resp.txt", "boot|OK|ddbridge ready")
-log.info(TAG .. "v1.37.0 ready (item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")
+log.info(TAG .. "v1.86.0 ready (item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")

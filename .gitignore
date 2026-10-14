@@ -16,3 +16,4 @@ dev_mode.txt
 # OS
 .DS_Store
 Thumbs.db
+*.exe

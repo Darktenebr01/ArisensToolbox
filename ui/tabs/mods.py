@@ -214,7 +214,7 @@ class ModsTab(ctk.CTkFrame):
 
         Muted(cc, "Warp to a map pin/icon or your active quest marker through the engine's "
                   "warp pipeline — your pawn party comes along, no Ferrystones needed. "
-                  "You get 6 seconds of fall immunity after every warp.",
+                  "You get 6 seconds of fall protection after every warp.",
               row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         ctk.CTkLabel(cc, text="Mode:", font=(T.FONT_FAMILY, 12),
@@ -239,6 +239,8 @@ class ModsTab(ctk.CTkFrame):
                       command=lambda: self.warp_async("warp_to_pin")).pack(side="left", padx=(0, 8))
         PrimaryButton(brow, text="Warp to quest marker", width=190,
                       command=lambda: self.warp_async("warp_to_quest")).pack(side="left", padx=8)
+        GhostButton(brow, text="Diagnose warp", width=140,
+                    command=self.warp_probe_async).pack(side="left", padx=8)
 
         self.warp_var = ctk.StringVar(value="")
         ctk.CTkLabel(cc, textvariable=self.warp_var,
@@ -263,6 +265,22 @@ class ModsTab(ctk.CTkFrame):
             res = client.send(cmd, mode, alt, timeout=30)
             self.after(0, lambda: (self.app.set_status(res),
                                    self.warp_var.set(res)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def warp_probe_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._do_warp_probe(client))
+
+    def _do_warp_probe(self, client):
+        try:
+            res = client.send("warp_probe", timeout=30)
+            text = res.replace(" // ", "\n")
+            self.after(0, lambda: show_probe(
+                self, "Warp diagnostics - copy all of it", text))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -300,6 +318,12 @@ class ModsTab(ctk.CTkFrame):
                     command=self.respawn_reset_async).pack(side="left", padx=8)
         GhostButton(brow, text="--> Fast Forward 3 Days (Clear Corpses) <--", width=340,
                     command=self.respawn_clear_async).pack(side="left", padx=8)
+        GhostButton(brow, text="Diagnose time-skip", width=170,
+                    command=self.timeskip_probe_async).pack(side="left", padx=8)
+        GhostButton(brow, text="Dump time-skip sig", width=170,
+                    command=self.timeskip_sig_async).pack(side="left", padx=8)
+        GhostButton(brow, text="Dump time fields", width=150,
+                    command=self.timemgr_dump_async).pack(side="left", padx=8)
 
         self.respawn_var = ctk.StringVar(value="")
         ctk.CTkLabel(cc, textvariable=self.respawn_var,
@@ -350,6 +374,54 @@ class ModsTab(ctk.CTkFrame):
                 self.app.set_status("Fast-forward done - full output in the popup."),
                 self.respawn_var.set("Full output in the popup."),
                 show_probe(self, "Fast Forward 3 Days - copy all of it", res)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def timeskip_probe_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._do_timeskip_probe(client))
+
+    def timeskip_sig_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._do_timeskip_sig(client))
+
+    def timemgr_dump_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        run_async(self, lambda: self._do_timemgr_dump(client))
+
+    def _do_timemgr_dump(self, client):
+        try:
+            res = client.send("timemgr_dump", timeout=20)
+            text = res.replace(" // ", "\n")
+            self.after(0, lambda: show_probe(
+                self, "Time fields - copy all of it", text))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda err=err: self.respawn_var.set(err))
+
+    def _do_timeskip_sig(self, client):
+        try:
+            res = client.send("timeskip_sig", timeout=15)
+            text = res.replace(" // ", "\n")
+            self.after(0, lambda: show_probe(
+                self, "Time-skip signature - copy all of it", text))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda err=err: self.respawn_var.set(err))
+
+    def _do_timeskip_probe(self, client):
+        try:
+            res = client.send("timeskip_probe", timeout=15)
+            text = res.replace(" // ", "\n")
+            self.after(0, lambda: show_probe(
+                self, "Time-skip probe - copy all of it", text))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

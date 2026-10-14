@@ -24,7 +24,7 @@ from ui import theme as T
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-CLIENT_VERSION = "0.37"
+CLIENT_VERSION = "0.86"
 
 # Tabs hidden from the sidebar in normal use (still importable/shown by code).
 DEV_TABS = {"Level & Stats", "Stat Search", "Signatures"}

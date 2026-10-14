@@ -15,7 +15,7 @@ from bridge.protocol import BridgeClient, BridgeError, BridgeTimeout
 from ui import theme as T
 from ui.widgets import Card, card_content, H1, Muted, PrimaryButton, GhostButton
 
-EXPECTED_MAJOR = "1.37"  # must match ddbridge.lua's pong
+EXPECTED_MAJOR = "1.86"  # must match ddbridge.lua's pong
 REFRAMEWORK_URL = ("https://github.com/praydog/REFramework-nightly/releases/"
                    "latest/download/REFramework.zip")
 DD2_STEAM_APPID = "2054970"
