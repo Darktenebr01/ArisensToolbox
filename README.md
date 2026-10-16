@@ -25,6 +25,10 @@ no AOB patterns**, so it keeps working after Capcom title updates.
 
 ## Changelog
 
+- **v0.90** — Weapon Skills cleanup: removed the temporary diagnostic buttons (Probe skill detail, Dump enabled list, Try fix selected). Kept Probe levels/upgrades, equipment probes, and Add missing entry. Lua unchanged at v1.89.0.
+- **v0.89** — SmokeGiants: "Add missing entry" — if the skill has no EnabledCustomSkills entry (120 has none while all others do), create one (CustomSkillID + Level) and List.Add it, with read-backs; if an entry exists, set its Level field.
+- **v0.88** — SmokeGiants follow-up: read-only "Dump enabled list" (every EnabledCustomSkills entry + ReachLevel) + "Try fix selected" (prepareEnableCustomSkillList, then enable, then level-up + enable again, with read-backs and a check that no other skill changed).
+- **v0.87** — Read-only "Probe skill detail" on Weapon Skills: lists every CustomSkill method + every SkillContext field + LevelNo enum + per-skill getters (for the SmokeGiants diagnosis).
 - **v0.86** — Item rename: the `get_Name` hook now walks the parent type chain to the type that declares it.
 - **v0.85** — "PROBE type" reports the real item-data type and its Name methods.
 - **v0.84** — Rename hook tries both type names and falls back to the real item's type.

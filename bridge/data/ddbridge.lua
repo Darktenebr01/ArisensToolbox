@@ -1,4 +1,4 @@
--- ddbridge.lua  v1.86.0  (Dragon's Dogma 2 / REFramework)
+-- ddbridge.lua  v1.89.0  (Dragon's Dogma 2 / REFramework)
 -- Command bridge for the "DD2 Bridge" Cheat Engine table.
 -- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
 -- The Cheat Engine table writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
@@ -240,7 +240,7 @@ local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
 -- each command gets the argument list (strings) and returns a one-line string payload
 local COMMANDS = {}
 
-COMMANDS.ping = function() return "pong ddbridge 1.86.0" end
+COMMANDS.ping = function() return "pong ddbridge 1.89.0" end
 
 COMMANDS.list_items = function() return tostring(build_items()) end
 
@@ -1178,6 +1178,331 @@ COMMANDS.set_wlevel = function(a)
   local after = try(function() return c.skill:call("getCustomSkillLevel", id) end)
   return string.format("requested level %d: game now reports %s (was %s) via %s%s", lvl, tostring(after), tostring(before),
     #used > 0 and table.concat(used, "+") or "nothing", (after == lvl) and "" or "  - NOT applied: the game keeps its own rule for this skill")
+end
+
+---------------------------------------------------------------- v1.87 skill detail probe (read-only)
+-- args: target, job. Lists every CustomSkill method + every SkillContext field + the LevelNo enum
+-- + every read-only 1-arg CustomSkill getter per skill of the vocation. Never calls a setter.
+-- Results go to wskill_detail.txt. Built to find what is different about one skill (SmokeGiants).
+COMMANDS.wskill_detail = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local skill = c.skill
+  if type(skill) ~= "userdata" then error("SkillContext not found") end
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local t0 = try(function() return skill:get_type_definition() end)
+  L("SkillContext type: " .. tostring(t0 and try(function() return t0:get_full_name() end) or "?"))
+  L("--- METHODS containing CustomSkill (all parents, sorted) ---")
+  local mseen = {}
+  local mlist = {}
+  local t = t0
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local n = m:get_name()
+      if n:find("CustomSkill", 1, true) then
+        local pts = m:get_param_types() or {}
+        local ps = {}
+        for _, p in ipairs(pts) do ps[#ps + 1] = try(function() return p:get_full_name() end) or "?" end
+        local rt = try(function() return m:get_return_type():get_full_name() end) or "?"
+        local key = n .. "(" .. table.concat(ps, ",") .. ") -> " .. rt
+        if not mseen[key] then mseen[key] = true mlist[#mlist + 1] = key end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  table.sort(mlist)
+  for _, s in ipairs(mlist) do L("METHOD " .. s) end
+  L("methods: " .. tostring(#mlist))
+  L("--- FIELDS of SkillContext (non-static, all parents) ---")
+  local fseen = {}
+  local flist = {}
+  t = t0
+  while t do
+    for _, f in ipairs(try(function() return t:get_fields() end) or {}) do
+      if not try(function() return f:is_static() end) then
+        local fn = try(function() return f:get_name() end) or "?"
+        if not fseen[fn] then
+          fseen[fn] = true
+          local ftype = try(function() return f:get_type():get_full_name() end) or "?"
+          local v = try(function() return skill:get_field(fn) end)
+          if v == nil then v = try(function() return f:get_data(skill) end) end
+          local vs = ""
+          if type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+            vs = " = " .. clean(v):sub(1, 120)
+          elseif type(v) == "userdata" then
+            local vt = try(function() return v:get_type_definition():get_full_name() end) or "userdata"
+            local cnt = try(function() return v:call("get_Count") end)
+            if cnt == nil then cnt = try(function() return v:call("get_Length") end) end
+            if cnt == nil then cnt = try(function() return v:get_field("_count") end) end
+            if cnt == nil then cnt = try(function() return v:get_field("_size") end) end
+            if cnt == nil then
+              local els = try(function() return v:get_elements() end)
+              if type(els) == "table" then cnt = #els end
+            end
+            vs = " = <" .. vt .. ">" .. (cnt ~= nil and (" count=" .. tostring(cnt)) or "")
+          elseif v == nil then
+            vs = " = <nil>"
+          else
+            vs = " = <" .. type(v) .. ">"
+          end
+          flist[#flist + 1] = "FIELD " .. fn .. " : " .. ftype .. vs
+        end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  table.sort(flist)
+  for _, s in ipairs(flist) do L(s) end
+  L("--- HumanCustomSkillLevelNo ---")
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillLevelNo")) do
+    L("LEVELNO " .. fmt_int(ent.value) .. " " .. ent.name)
+  end
+  L("--- GETTERS per skill (read-only, set* skipped) ---")
+  local getters = {}
+  local gseen = {}
+  t = t0
+  while t do
+    for _, m in ipairs(t:get_methods() or {}) do
+      local n = m:get_name()
+      if n:sub(1, 3) ~= "set" then
+        local pts = m:get_param_types() or {}
+        if #pts == 1 then
+          local pn = try(function() return pts[1]:get_full_name() end) or ""
+          if pn:find("HumanCustomSkillID", 1, true) and not gseen[n] then
+            gseen[n] = true
+            getters[#getters + 1] = { name = n, m = m }
+          end
+        end
+      end
+    end
+    t = try(function() return t:get_parent_type() end)
+  end
+  table.sort(getters, function(x, y) return x.name < y.name end)
+  local gnames = {}
+  for _, g in ipairs(getters) do gnames[#gnames + 1] = g.name end
+  L("getters: " .. table.concat(gnames, " "))
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+    if ent.value ~= 0 and job_of(ent.name) == job then
+      local parts = {}
+      for _, g in ipairs(getters) do
+        local ok, v = pcall(function() return g.m:call(skill, ent.value) end)
+        if ok and (type(v) == "number" or type(v) == "boolean" or type(v) == "string") then
+          parts[#parts + 1] = g.name .. "=" .. clean(v):sub(1, 60)
+        end
+      end
+      L(fmt_int(ent.value) .. " " .. ent.name .. " " .. table.concat(parts, " "))
+    end
+  end
+  for _, s in ipairs(lines) do log.info(TAG .. "wskill_detail: " .. s) end
+  if not wr(DIR .. "wskill_detail.txt", table.concat(lines, "\n")) then error("could not write wskill_detail.txt") end
+  return string.format("%d methods, %d fields, %d getters; %d lines", #mlist, #flist, #getters, #lines)
+end
+
+---------------------------------------------------------------- v1.88 enabled-list dump (read-only)
+-- args: target, job. Dumps every EnabledCustomSkills entry (its fields) + ReachLevel per skill.
+-- Read-only: never calls a setter. Results go to wskill_enabled.txt.
+COMMANDS.wskill_enabled_dump = function(a)
+  local c = get_target(a[1])
+  local job = int(a[2])
+  local skill = c.skill
+  if type(skill) ~= "userdata" then error("SkillContext not found") end
+  local lines = {}
+  local function L(x) lines[#lines + 1] = x end
+  local list = try(function() return skill:get_field("EnabledCustomSkills") end)
+  if type(list) ~= "userdata" then error("EnabledCustomSkills not found") end
+  local els = coll_elems(list)
+  if #els == 0 then
+    local cnt = try(function() return list:call("get_Count") end) or 0
+    for i = 0, cnt - 1 do
+      local e = try(function() return list:call("get_Item", i) end)
+      if e ~= nil then els[#els + 1] = e end
+    end
+  end
+  L("EnabledCustomSkills entries: " .. tostring(#els))
+  for i, e in ipairs(els) do
+    if type(e) ~= "userdata" then
+      L("ENTRY " .. tostring(i) .. " <not userdata: " .. type(e) .. ">")
+    else
+      local td = try(function() return e:get_type_definition() end)
+      local tname = (td and try(function() return td:get_full_name() end)) or "?"
+      local parts = {}
+      local seen = {}
+      local t2 = td
+      while t2 do
+        for _, f in ipairs(try(function() return t2:get_fields() end) or {}) do
+          if not try(function() return f:is_static() end) then
+            local fn = try(function() return f:get_name() end) or "?"
+            if not seen[fn] then
+              seen[fn] = true
+              local v = try(function() return e:get_field(fn) end)
+              if v == nil then v = try(function() return f:get_data(e) end) end
+              if type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+                parts[#parts + 1] = fn .. "=" .. clean(v):sub(1, 60)
+              elseif type(v) == "userdata" then
+                parts[#parts + 1] = fn .. "=<" .. (try(function() return v:get_type_definition():get_full_name() end) or "userdata") .. ">"
+              elseif v == nil then
+                parts[#parts + 1] = fn .. "=<nil>"
+              else
+                parts[#parts + 1] = fn .. "=<" .. type(v) .. ">"
+              end
+            end
+          end
+        end
+        t2 = try(function() return t2:get_parent_type() end)
+      end
+      L("ENTRY " .. tostring(i) .. " type=" .. tname .. " " .. table.concat(parts, " "))
+    end
+  end
+  L("--- isCustomSkillReachLevel per skill ---")
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+    if ent.value ~= 0 and job_of(ent.name) == job then
+      local r1 = try(function() return skill:call("isCustomSkillReachLevel", ent.value, 1) end)
+      local r2 = try(function() return skill:call("isCustomSkillReachLevel", ent.value, 2) end)
+      local en = try(function() return skill:call("isCustomSkillEnable", ent.value) end)
+      local lv = try(function() return skill:call("getCustomSkillLevel", ent.value) end)
+      L(fmt_int(ent.value) .. " " .. ent.name .. " enable=" .. tostring(en) .. " level=" .. tostring(lv)
+        .. " ReachLv1=" .. tostring(r1) .. " ReachLv2=" .. tostring(r2))
+    end
+  end
+  for _, s in ipairs(lines) do log.info(TAG .. "wskill_enabled_dump: " .. s) end
+  if not wr(DIR .. "wskill_enabled.txt", table.concat(lines, "\n")) then error("could not write wskill_enabled.txt") end
+  return tostring(#els) .. " entries, " .. tostring(#lines) .. " lines"
+end
+
+---------------------------------------------------------------- v1.88 try-fix for one skill (writes, with read-backs)
+-- args: target, skill id, level. Tries prepareEnableCustomSkillList, then setCustomSkillEnable,
+-- then (only if still disabled) setCustomSkillLevelUp + setCustomSkillEnable again. Reads back
+-- after every step and reports whether any OTHER skill of the same vocation changed.
+COMMANDS.wskill_try_fix = function(a)
+  local c = get_target(a[1])
+  local id, lvl = int(a[2]), int(a[3])
+  local skill = c.skill
+  if type(skill) ~= "userdata" then error("SkillContext not found") end
+  local job = nil
+  for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+    if ent.value == id then job = job_of(ent.name) break end
+  end
+  if job == nil then error("skill id not in HumanCustomSkillID") end
+  local function snap()
+    local m = {}
+    for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+      if ent.value ~= 0 and job_of(ent.name) == job then
+        local en = try(function() return skill:call("isCustomSkillEnable", ent.value) end)
+        local lv = try(function() return skill:call("getCustomSkillLevel", ent.value) end)
+        m[ent.value] = tostring(en) .. "/" .. tostring(lv)
+      end
+    end
+    return m
+  end
+  local function cur()
+    local en = try(function() return skill:call("isCustomSkillEnable", id) end)
+    local lv = try(function() return skill:call("getCustomSkillLevel", id) end)
+    return tostring(en) .. "/" .. tostring(lv)
+  end
+  local before = snap()
+  local steps = {}
+  steps[#steps + 1] = "start enable/level=" .. cur()
+  local ok1 = pcall(function() skill:call("prepareEnableCustomSkillList") end)
+  steps[#steps + 1] = "prepareEnableCustomSkillList ok=" .. tostring(ok1) .. " now=" .. cur()
+  local ok2 = pcall(call_ov, skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, id, lvl)
+  steps[#steps + 1] = "setCustomSkillEnable ok=" .. tostring(ok2) .. " now=" .. cur()
+  local en = try(function() return skill:call("isCustomSkillEnable", id) end)
+  if en ~= true then
+    local ok3 = pcall(function() skill:call("setCustomSkillLevelUp", id) end)
+    steps[#steps + 1] = "setCustomSkillLevelUp ok=" .. tostring(ok3) .. " now=" .. cur()
+    local ok4 = pcall(call_ov, skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, id, lvl)
+    steps[#steps + 1] = "setCustomSkillEnable#2 ok=" .. tostring(ok4) .. " now=" .. cur()
+  end
+  local after = snap()
+  local changed = {}
+  for k, v in pairs(after) do
+    if k ~= id and before[k] ~= v then changed[#changed + 1] = tostring(k) .. ":" .. tostring(before[k]) .. "->" .. tostring(v) end
+  end
+  table.sort(changed)
+  steps[#steps + 1] = "other skills changed: " .. (#changed > 0 and table.concat(changed, " ") or "none")
+  for _, s in ipairs(steps) do log.info(TAG .. "wskill_try_fix: " .. s) end
+  return table.concat(steps, " | ")
+end
+
+---------------------------------------------------------------- v1.89 add a missing EnabledCustomSkills entry (writes, with read-backs)
+-- args: target, skill id, level. The v0.88 dump showed SmokeGiants (120) has NO entry in
+-- EnabledCustomSkills while every other skill does, and all setters were no-ops for it.
+-- Hypothesis: the setters only update an existing entry. So: if an entry exists, set its
+-- Level field; if not, create one (CustomSkillID=id, Level=lvl) and List.Add it, then
+-- call setCustomSkillEnable once more. Reports every step + read-backs.
+COMMANDS.wskill_add_entry = function(a)
+  local c = get_target(a[1])
+  local id, lvl = int(a[2]), int(a[3])
+  local skill = c.skill
+  if type(skill) ~= "userdata" then error("SkillContext not found") end
+  local function cur()
+    local en = try(function() return skill:call("isCustomSkillEnable", id) end)
+    local lv = try(function() return skill:call("getCustomSkillLevel", id) end)
+    return tostring(en) .. "/" .. tostring(lv)
+  end
+  local steps = {}
+  steps[#steps + 1] = "start enable/level=" .. cur()
+  local list = try(function() return skill:get_field("EnabledCustomSkills") end)
+  if type(list) ~= "userdata" then error("EnabledCustomSkills not found") end
+  local function list_count()
+    local els = coll_elems(list)
+    if #els > 0 then return #els end
+    local cnt = try(function() return list:call("get_Count") end)
+    return cnt or -1
+  end
+  steps[#steps + 1] = "list count before=" .. tostring(list_count())
+  local els = coll_elems(list)
+  if #els == 0 then
+    local cnt = try(function() return list:call("get_Count") end) or 0
+    for i = 0, cnt - 1 do
+      local e = try(function() return list:call("get_Item", i) end)
+      if e ~= nil then els[#els + 1] = e end
+    end
+  end
+  local found = nil
+  for _, e in ipairs(els) do
+    if type(e) == "userdata" then
+      local cid = try(function() return e:get_field("CustomSkillID") end)
+      if cid == id then found = e break end
+    end
+  end
+  if found ~= nil then
+    steps[#steps + 1] = "entry already exists, setting its Level field to " .. tostring(lvl)
+    local ok_set = pcall(function() found:set_field("Level", lvl) end)
+    steps[#steps + 1] = "set_field Level ok=" .. tostring(ok_set) .. " now=" .. cur()
+    local ok_en = pcall(call_ov, skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, id, lvl)
+    steps[#steps + 1] = "setCustomSkillEnable ok=" .. tostring(ok_en) .. " now=" .. cur()
+  else
+    steps[#steps + 1] = "no entry for id " .. tostring(id) .. ", creating one"
+    local td = sdk.find_type_definition("app.HumanSkillContext.EnabledCustomSkill")
+    steps[#steps + 1] = "type found=" .. tostring(td ~= nil)
+    local newobj = nil
+    local create_ok = pcall(function()
+      if td and td.create_instance then newobj = td:create_instance() end
+    end)
+    steps[#steps + 1] = "create_instance ok=" .. tostring(create_ok) .. " obj=" .. tostring(type(newobj))
+    if type(newobj) ~= "userdata" then
+      local ok2 = pcall(function()
+        if sdk.create_instance then newobj = sdk.create_instance("app.HumanSkillContext.EnabledCustomSkill") end
+      end)
+      steps[#steps + 1] = "sdk.create_instance fallback ok=" .. tostring(ok2) .. " obj=" .. tostring(type(newobj))
+    end
+    if type(newobj) ~= "userdata" then error("could not create EnabledCustomSkill instance") end
+    local ok_id = pcall(function() newobj:set_field("CustomSkillID", id) end)
+    local ok_lv = pcall(function() newobj:set_field("Level", lvl) end)
+    local ok_vn = pcall(function() newobj:set_field("IsViewedNew", false) end)
+    steps[#steps + 1] = "set fields ID ok=" .. tostring(ok_id) .. " Level ok=" .. tostring(ok_lv) .. " Viewed ok=" .. tostring(ok_vn)
+    local rid = try(function() return newobj:get_field("CustomSkillID") end)
+    local rlv = try(function() return newobj:get_field("Level") end)
+    steps[#steps + 1] = "new obj reads ID=" .. tostring(rid) .. " Level=" .. tostring(rlv)
+    local ok_add = pcall(function() list:call("Add", newobj) end)
+    steps[#steps + 1] = "List.Add ok=" .. tostring(ok_add) .. " count now=" .. tostring(list_count()) .. " getters now=" .. cur()
+    local ok_en = pcall(call_ov, skill, "setCustomSkillEnable", "HumanCustomSkillID", 2, id, lvl)
+    steps[#steps + 1] = "setCustomSkillEnable after Add ok=" .. tostring(ok_en) .. " now=" .. cur()
+  end
+  for _, s in ipairs(steps) do log.info(TAG .. "wskill_add_entry: " .. s) end
+  return table.concat(steps, " | ")
 end
 
 ---------------------------------------------------------------- v1.1 core skills
