@@ -14,7 +14,7 @@ import re, sys, glob
 
 bad = 0
 for f in sorted(glob.glob('ui/**/*.py', recursive=True)):
-    lines = open(f).read().split('\n')
+    lines = open(f, encoding='utf-8', errors='replace').read().split('\n')
     for i, ln in enumerate(lines):
         if 'after(0,' in ln and 'lambda' in ln:
             exc = None
