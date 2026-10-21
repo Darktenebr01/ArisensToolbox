@@ -3,9 +3,10 @@ import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton,
+    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
     Field, StyledListbox, run_async, require_client, show_probe,
 )
 
@@ -17,7 +18,7 @@ def _clean_name(s):
     return s[:12]
 
 
-class NamesTab(ctk.CTkFrame):
+class NamesTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -34,8 +35,8 @@ class NamesTab(ctk.CTkFrame):
         brow.grid(row=2, column=0, sticky="w", pady=(0, 4))
         GhostButton(brow, text="Refresh all", width=110,
                     command=self.refresh_async).pack(side="left")
-        GhostButton(brow, text="Diagnose", width=110,
-                    command=self.diagnose_async).pack(side="left", padx=(8, 0))
+        dev_only(self, lambda: GhostButton(brow, text="Diagnose", width=110,
+                    command=self.diagnose_async).pack(side="left", padx=(8, 0)))
 
         # Arisen card
         card = Card(self, row=3, column=0, sticky="ew", padx=4, pady=6)
@@ -145,9 +146,14 @@ class NamesTab(ctk.CTkFrame):
 
     # -- rename --------------------------------------------------------
 
-    def _rename(self, client, cmd, *args):
+    def _rename(self, client, cmd, *args, undo=None):
         try:
             res = client.send(cmd, *args, timeout=20)
+            if undo:
+                label, ucmd, uargs = undo
+                self.app.record_undo(
+                    label,
+                    lambda c, cc=ucmd, aa=uargs: c.send(cc, *aa, timeout=20))
             self.after(0, lambda: (
                 self.app.set_status(res),
                 self.refresh_async()))
@@ -162,7 +168,11 @@ class NamesTab(ctk.CTkFrame):
             return
         client = require_client(self.app)
         if client:
-            run_async(self, lambda: self._rename(client, "set_arisen_name", name))
+            old = self.arisen_cur.cget("text")
+            undo = ((f"name '{old}'", "set_arisen_name", (old,))
+                    if old and old != "—" else None)
+            run_async(self, lambda: self._rename(
+                client, "set_arisen_name", name, undo=undo))
 
     def rename_main_async(self):
         name = _clean_name(self.main_var.get())
@@ -171,7 +181,11 @@ class NamesTab(ctk.CTkFrame):
             return
         client = require_client(self.app)
         if client:
-            run_async(self, lambda: self._rename(client, "set_pawn_name", "0", name))
+            old = self.main_cur.cget("text")
+            undo = ((f"pawn name '{old}'", "set_pawn_name", ("0", old))
+                    if old and old != "—" else None)
+            run_async(self, lambda: self._rename(
+                client, "set_pawn_name", "0", name, undo=undo))
 
     def rename_hired_async(self):
         sel = self.pawn_list.curselection()

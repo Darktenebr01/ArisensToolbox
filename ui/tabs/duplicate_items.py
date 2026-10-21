@@ -3,16 +3,17 @@ import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, Muted, PrimaryButton, GhostButton,
+    Card, card_content, H1, Muted, PrimaryButton, GhostButton, dev_only,
     Field, Combo, Check, StyledListbox, run_async, require_client,
 )
 
 MAX_SHOWN = 500
 
 
-class DuplicateItemsTab(ctk.CTkFrame):
+class DuplicateItemsTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -89,8 +90,8 @@ class DuplicateItemsTab(ctk.CTkFrame):
                       command=self.duplicate_async).pack(side="left", padx=(0, 8))
         GhostButton(brow, text="Double the stack", width=140,
                     command=lambda: self._do_dup_async(0)).pack(side="left", padx=8)
-        GhostButton(brow, text="Probe selected (writes REFramework log)", width=290,
-                    command=self.probe_async).pack(side="left", padx=8)
+        dev_only(self, lambda: GhostButton(brow, text="Probe selected (writes REFramework log)", width=290,
+                    command=self.probe_async).pack(side="left", padx=8))
 
         Muted(cc, "New copies go to your inventory (or storage if ticked). "
                   "Equipment copies get the same skills/enhancement when the box is ticked.",

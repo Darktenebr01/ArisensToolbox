@@ -3,14 +3,15 @@ import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton,
+    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
     Field, StyledListbox, run_async, require_client, show_probe,
 )
 
 
-class PawnTab(ctk.CTkFrame):
+class PawnTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -67,10 +68,10 @@ class PawnTab(ctk.CTkFrame):
         brow2.grid(row=3, column=0, sticky="w")
         GhostButton(brow2, text="Grant selected badge", width=170,
                     command=self.grant_badge_async).pack(side="left")
-        GhostButton(brow2, text="Probe badge data", width=150,
-                    command=self.probe_badges_async).pack(side="left", padx=8)
-        GhostButton(brow2, text="Probe badge names", width=160,
-                    command=self.probe_badge_names_async).pack(side="left")
+        dev_only(self, lambda: GhostButton(brow2, text="Probe badge data", width=150,
+                    command=self.probe_badges_async).pack(side="left", padx=8))
+        dev_only(self, lambda: GhostButton(brow2, text="Probe badge names", width=160,
+                    command=self.probe_badge_names_async).pack(side="left"))
 
     # -- refresh (called by the app after pawn picker changes) ----------
 
@@ -114,7 +115,19 @@ class PawnTab(ctk.CTkFrame):
 
     def _apply_rating(self, client, g, l):
         try:
+            prev = None
+            try:
+                parts = (client.send("get_rating") or "").split(",")
+                if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
+                    prev = tuple(int(p.strip()) for p in parts)
+            except (BridgeError, BridgeTimeout):
+                pass
             client.send("set_rating", g, l)
+            if prev and prev != (g, l):
+                pg, pl = prev
+                self.app.record_undo(
+                    f"rating {pg}/{pl}",
+                    lambda c, a=pg, b=pl: c.send("set_rating", a, b))
             self.after(0, lambda: self.app.set_status("Rating applied."))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
@@ -212,12 +225,16 @@ class PawnTab(ctk.CTkFrame):
         client = require_client(self.app)
         if not client:
             return
-        n = b[0]
-        run_async(self, lambda: self._set_badge(client, n, v))
+        n, prev = b[0], b[1]
+        run_async(self, lambda: self._set_badge(client, n, v, prev))
 
-    def _set_badge(self, client, n, v):
+    def _set_badge(self, client, n, v, prev=None):
         try:
             client.send("set_badge", n, v)
+            if prev is not None and prev != v:
+                self.app.record_undo(
+                    f"PB{n:03d} = {prev}",
+                    lambda c, nn=n, pp=prev: c.send("set_badge", nn, pp))
             self.after(0, lambda: (
                 self.app.set_status(f"PB{n:03d} = {v}"),
                 self.read_badges_async()))
@@ -229,11 +246,25 @@ class PawnTab(ctk.CTkFrame):
         client = require_client(self.app)
         if not client:
             return
+        n = len(getattr(self, "badges", []) or [])
+        what = (f"This writes to your save: all {n} loaded badges will "
+                "be set to their quota." if n else
+                "This writes to your save: all badges will be set to "
+                "their quota.")
+        if not self.app.confirm_bulk("Fill all badges", what):
+            return
         run_async(self, lambda: self._fill_badges(client))
 
     def _fill_badges(self, client):
         try:
+            prev = list(getattr(self, "badges", []) or [])
             res = client.send("fill_badges", timeout=60)
+            if prev:
+                def _undo(c, snap=prev):
+                    for nn, cur in snap:
+                        c.send("set_badge", nn, cur)
+                    return f"restored {len(snap)} badges"
+                self.app.record_undo("fill badges", _undo)
             self.after(0, lambda: (
                 self.app.set_status(f"Filled {res} badges."),
                 self.read_badges_async()))
@@ -249,12 +280,16 @@ class PawnTab(ctk.CTkFrame):
         client = require_client(self.app)
         if not client:
             return
-        n = b[0]
-        run_async(self, lambda: self._grant_badge(client, n))
+        n, prev = b[0], b[1]
+        run_async(self, lambda: self._grant_badge(client, n, prev))
 
-    def _grant_badge(self, client, n):
+    def _grant_badge(self, client, n, prev=None):
         try:
             client.send("grant_badge", n)
+            if prev is not None:
+                self.app.record_undo(
+                    f"PB{n:03d} = {prev}",
+                    lambda c, nn=n, pp=prev: c.send("set_badge", nn, pp))
             self.after(0, lambda: self.app.set_status(f"Granted PB{n}"))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"

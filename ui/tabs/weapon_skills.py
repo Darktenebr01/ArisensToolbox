@@ -4,11 +4,12 @@ import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
     run_async, require_client, show_probe, JOB_LABELS,
     Card, card_content, H1, Muted,
-    PrimaryButton, GhostButton, Combo, Check, StyledListbox,
+    PrimaryButton, GhostButton, dev_only, Combo, Check, StyledListbox,
 )
 
 
@@ -21,7 +22,7 @@ def _custom_owner(enum_data):
     return owner
 
 
-class WeaponSkillsTab(ctk.CTkFrame):
+class WeaponSkillsTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -97,19 +98,19 @@ class WeaponSkillsTab(ctk.CTkFrame):
                     command=lambda: self.unlock_all_async(0)).pack(pady=3)
         GhostButton(bcol, "Unlock EVERY vocation", width=200,
                     command=lambda: self.unlock_all_async(-1)).pack(pady=3)
-        GhostButton(bcol, "Probe levels / upgrades", width=200,
-                    command=self.probe_async).pack(pady=3)
+        dev_only(self, lambda: GhostButton(bcol, "Probe levels / upgrades", width=200,
+                    command=self.probe_async).pack(pady=3))
         GhostButton(bcol, "Add missing entry", width=200,
                     command=self.add_entry_async).pack(pady=3)
         GhostButton(bcol, "Set level of selected", width=200,
                     command=self.set_level_async).pack(pady=3)
         ctk.CTkLabel(bcol, **T.muted("Uses the 'Unlock level' box above.")).pack(pady=(6, 2))
-        GhostButton(bcol, "Probe equipment abilities", width=200,
+        dev_only(self, lambda: GhostButton(bcol, "Probe equipment abilities", width=200,
                     command=lambda: self.eq_probe_async("eqability_probe", "eqability.txt",
-                                                        "Equipment ability probe")).pack(pady=3)
-        GhostButton(bcol, "Probe abilities (part 2)", width=200,
+                                                        "Equipment ability probe")).pack(pady=3))
+        dev_only(self, lambda: GhostButton(bcol, "Probe abilities (part 2)", width=200,
                     command=lambda: self.eq_probe_async("eqability_probe2", "eqability2.txt",
-                                                        "Equipment ability probe 2")).pack(pady=3)
+                                                        "Equipment ability probe 2")).pack(pady=3))
 
     # -- enum helpers -------------------------------------------------
 
@@ -255,7 +256,9 @@ class WeaponSkillsTab(ctk.CTkFrame):
     def _apply_wstate(self, rows, custom_name):
         self.wlist.delete(0, tk.END)
         self.w_rows = []
+        self.w_state = {}
         for sid, en, lv in rows:
+            self.w_state[sid] = (en, lv)
             self.w_rows.append(sid)
             name = custom_name.get(sid, str(sid))
             extra = f"   | {self.w_info[sid]}" if sid in self.w_info else ""
@@ -313,6 +316,14 @@ class WeaponSkillsTab(ctk.CTkFrame):
         client = require_client(self.app)
         if not client:
             return
+        scope = ("every vocation" if which == -1 else
+                 f"vocation {self.app.job():02d}")
+        n = len(getattr(self, "w_rows", []) or [])
+        what = (f"This writes to your save: weapon skills for {scope} "
+                f"will be unlocked at the chosen level"
+                + (f" ({n} skills in the current list)." if n else "."))
+        if not self.app.confirm_bulk("Unlock all weapon skills", what):
+            return
         tgt, job = self.app.target(), self.app.job() if which == 0 else 0
         lvl = self._unlock_level()
         run_async(self, lambda: self._do_simple(
@@ -328,11 +339,28 @@ class WeaponSkillsTab(ctk.CTkFrame):
         if not client:
             return
         tgt, lvl = self.app.target(), self._unlock_level()
-        run_async(self, lambda: self._do_simple(
-            client, "set_wlevel", (tgt, sid, lvl), None,
-            lambda: (self._do_wstate(client, tgt, self.app.job(),
-                                     self.app.enum_data or {}),
-                     self.refresh_async(quiet=True))))
+        prev = None
+        state = getattr(self, "w_state", {}).get(sid)
+        if state and str(state[1]).lstrip("-").isdigit():
+            prev = int(state[1])
+        run_async(self, lambda: self._do_set_level(
+            client, tgt, sid, lvl, prev))
+
+    def _do_set_level(self, client, tgt, sid, lvl, prev):
+        try:
+            res = client.send("set_wlevel", tgt, sid, lvl, timeout=20)
+            if prev is not None and prev != lvl:
+                self.app.record_undo(
+                    f"skill {sid} level {prev}",
+                    lambda c, t=tgt, s=sid, p=prev: c.send(
+                        "set_wlevel", t, s, p, timeout=20))
+            self.after(0, lambda: self.app.set_status(res))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Error: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+        self._do_wstate(client, tgt, self.app.job(),
+                        self.app.enum_data or {})
+        self.refresh_async(quiet=True)
 
     def probe_async(self):
         client = require_client(self.app)

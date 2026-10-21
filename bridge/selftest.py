@@ -1,11 +1,13 @@
 """Headless connection test. Run: python -m bridge.selftest (game must be running)."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bridge.game_path import find_data_dir
 from bridge.protocol import BridgeClient, BridgeError, BridgeTimeout
+from version import BRIDGE_MAJOR, BRIDGE_VERSION
 
 
 def main():
@@ -21,8 +23,11 @@ def main():
         print("PING FAILED:", e)
         return 1
     print("pong:", pong)
-    if "1.22" not in pong:
-        print("WARNING: version mismatch, expected 1.22.x")
+    print("boot:", client.boot_id or "(legacy bridge - no session token)")
+    m = re.search(r"pong\s+ddbridge\s+(\d+\.\d+\.\d+)", pong or "")
+    if not m or not m.group(1).startswith(BRIDGE_MAJOR + "."):
+        print(f"WARNING: version mismatch, expected {BRIDGE_VERSION} "
+              f"(major {BRIDGE_MAJOR})")
         return 1
     print("SELFTEST OK")
     return 0

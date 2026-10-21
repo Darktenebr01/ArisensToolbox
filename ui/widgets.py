@@ -1,9 +1,12 @@
 """Shared UI helpers for Arisen's Toolbox tabs."""
+import logging
 import threading
 import tkinter as tk
 import customtkinter as ctk
 
 from ui import theme as T
+
+log = logging.getLogger("arisens.async")
 
 JOB_NAMES = [
     "Fighter", "Archer", "Mage", "Thief", "Warrior", "Sorcerer",
@@ -13,8 +16,77 @@ JOB_LABELS = [f"Job{i+1:02d} {n}" for i, n in enumerate(JOB_NAMES)]
 
 
 def run_async(widget, fn):
-    """Run fn() in a daemon thread (for blocking bridge calls)."""
-    threading.Thread(target=fn, daemon=True).start()
+    """Run fn() in a daemon thread (for blocking bridge calls).
+
+    Any unexpected exception is logged and surfaced in the status bar; in a
+    windowed build a silent thread death just looks like a dead button.
+    """
+    def _runner():
+        try:
+            fn()
+        except Exception:
+            log.exception("background task failed")
+            app = getattr(widget, "app", None)
+            if app is None and hasattr(widget, "call_soon"):
+                app = widget
+            if app is not None:
+                app.call_soon(app.set_status,
+                              "Unexpected error - see the log file.")
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+class Tooltip:
+    """Small hover tooltip (used on destructive / save-writing buttons)."""
+
+    def __init__(self, widget, text, delay_ms=600):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _show(self):
+        if self._tip is not None:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(tip, text=self.text, justify="left", wraplength=320,
+                 background="#2b2b2b", foreground="#f0ead8",
+                 font=("Segoe UI", 9), padx=8, pady=5,
+                 relief="solid", borderwidth=1).pack()
+        self._tip = tip
+
+    def _hide(self, _event=None):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+
+def dev_only(tab, factory):
+    """Build a probe/diagnostic widget only in dev mode (v0.92, §9).
+
+    ``factory()`` creates and packs/grids the widget. In normal mode this
+    is a no-op, so diagnostic buttons leave the default UI entirely while
+    staying one flag away for development.
+    """
+    if getattr(getattr(tab, "app", None), "dev_mode", False):
+        return factory()
+    return None
 
 
 def require_client(app):

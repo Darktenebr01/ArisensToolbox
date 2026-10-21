@@ -1,4 +1,4 @@
--- ddbridge.lua  v1.89.0  (Dragon's Dogma 2 / REFramework)
+-- ddbridge.lua  v1.89.2  (Dragon's Dogma 2 / REFramework)
 -- Command bridge for the "DD2 Bridge" Cheat Engine table.
 -- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
 -- The Cheat Engine table writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
@@ -8,6 +8,12 @@
 local TAG = "[ddbridge] "
 local DIR = "ddbridge/"
 local NAMES_FILE = "dd2_item_names.txt"
+
+-- Unique per game process. Commands must carry this token, so a cmd.txt left
+-- over from a previous session is rejected instead of being executed again.
+local BOOT = string.format("%d-%s", os.time(),
+  (tostring({}):match("0x(%x+)") or "0"))
+
 
 local function try(f, ...) local ok, r = pcall(f, ...) if ok then return r end return nil end
 local function tname(o)
@@ -40,6 +46,23 @@ local function split(s, sep)
   local t = {}
   for part in (s .. sep):gmatch("(.-)" .. sep:gsub("%p", "%%%0")) do t[#t + 1] = part end
   return t
+end
+
+-- Write a complete response. The |END sentinel lets the client reject a
+-- partial read, and the temp+rename keeps resp.txt whole whenever possible.
+local function write_resp(id, ok, res)
+  local body = id .. "|" .. (ok and "OK" or "ERR") .. "|" ..
+    tostring(res):gsub("[\r\n]+", " ") .. "|END"
+  local tmp = DIR .. "resp.tmp"
+  if wr(tmp, body) then
+    local src = "reframework/data/" .. tmp
+    local dst = "reframework/data/" .. DIR .. "resp.txt"
+    pcall(os.remove, dst)
+    if pcall(os.rename, src, dst) then return true end
+  end
+  -- os.rename is unavailable/blocked on some setups: the sentinel still
+  -- makes a partial response detectable by the client.
+  return wr(DIR .. "resp.txt", body)
 end
 
 local function elems_of(arr)
@@ -240,7 +263,7 @@ local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
 -- each command gets the argument list (strings) and returns a one-line string payload
 local COMMANDS = {}
 
-COMMANDS.ping = function() return "pong ddbridge 1.89.0" end
+COMMANDS.ping = function() return "pong ddbridge 1.89.2 boot=" .. BOOT end
 
 COMMANDS.list_items = function() return tostring(build_items()) end
 
@@ -461,32 +484,6 @@ COMMANDS.grant_badge = function(a)
   if not c.pdata then error("PawnDataContext not found") end
   c.pdata:call("addBadge", toint(2 ^ (math.floor(n) - 1)))
   return "ok"
-end
-
--- a native function address comes back as a raw pointer (light userdata), not a Lua number
-local function ptr_to_hex(p)
-  if type(p) == "number" then return string.format("%X", p) end
-  local n = try(function() return sdk.to_int64(p) end)
-  if type(n) == "number" then return string.format("%X", n) end
-  local str = tostring(p)
-  local h = str:match("0[xX](%x+)") or str:match(":%s*(%x+)%s*$")
-  if h then return (h:gsub("^0+(%x)", "%1")):upper() end
-  error("cannot convert pointer: " .. str)
-end
-
--- address of a method's native function (used by the table's signature harvester)
-COMMANDS.fn_addr = function(a)
-  local td = sdk.find_type_definition(a[1] or "")
-  if not td then error("type not found: " .. tostring(a[1])) end
-  local want = tonumber(a[3])
-  for _, m in ipairs(td:get_methods()) do
-    if m:get_name() == a[2] and (not want or #(m:get_param_types() or {}) == want) then
-      local fn = try(function() return m:get_function() end)
-      if fn == nil then error("get_function not available") end
-      return ptr_to_hex(fn)
-    end
-  end
-  error("method not found: " .. tostring(a[2]))
 end
 
 ---------------------------------------------------------------- v1.1 shared helpers
@@ -1622,15 +1619,23 @@ end
 
 COMMANDS.set_level = function(a)
   local c = get_target(a[1])
+  local lvl = int(a[2])
+  -- Sanity guard: DD2's normal cap is 200; negative or absurd values can
+  -- leave the save in a state the game cannot load.
+  if lvl < 1 or lvl > 200 then error("level out of range (1-200)") end
   if not c.status then error("StatusContext not found") end
-  c.status:call("set_Level", int(a[2]))
+  c.status:call("set_Level", lvl)
   return "ok"
 end
 
 COMMANDS.add_job_exp = function(a)
   local c = get_target(a[1])
+  local amount = int(a[2])
+  if amount < 0 or amount > 100000000 then
+    error("EXP out of range (0-100000000)")
+  end
   if not c.job then error("JobContext not found") end
-  call_ov(c.job, "addJobExp", nil, 1, int(a[2]))
+  call_ov(c.job, "addJobExp", nil, 1, amount)
   return "ok"
 end
 
@@ -1643,6 +1648,7 @@ end
 COMMANDS.set_fav = function(a)
   local v = tonumber(a[1])
   if not v then error("bad arguments") end
+  if v < 0 or v > 1000 then error("favorability out of range (0-1000)") end
   local c = get_target("pawn")
   if not c.mdata then error("MainPawnDataContext not found") end
   c.mdata:call("setFavorabilityRating", v + 0.0)
@@ -2867,6 +2873,9 @@ end
 COMMANDS.item_set_name = function(a)
   local r = row_of(a[1])
   local name = a[2] or ""
+  if name:find("|", 1, true) then
+    error("item names cannot contain '|'")
+  end
   local item = try(function() return r.master:call("get_ItemData") end)
   if not item then error("could not read item data") end
   local param = try(function() return r.master:call("get_Param") end)
@@ -5596,18 +5605,27 @@ re.on_frame(function()
   local id, cmd = parts[1], parts[2]
   if not id or id == "" or id == last_id then return end
   last_id = id
+  -- The last field is the boot token. ping is exempt so a fresh client can
+  -- discover the token; every other command must match this game process.
+  local marker = parts[#parts]
+  if cmd ~= "ping" and marker ~= ("B:" .. BOOT) then
+    write_resp(id, false, "STALE_SESSION")
+    return
+  end
+  local last = #parts
+  if marker and marker:sub(1, 2) == "B:" then last = last - 1 end
   local handler = COMMANDS[cmd or ""]
   local ok, res
   if handler then
     local args = {}
-    for i = 3, #parts do args[#args + 1] = parts[i] end
+    for i = 3, last do args[#args + 1] = parts[i] end
     ok, res = pcall(handler, args)
   else
     ok, res = false, "unknown command"
   end
   if not ok then log.info(TAG .. tostring(cmd) .. " failed: " .. tostring(res)) end
-  wr(DIR .. "resp.txt", id .. "|" .. (ok and "OK" or "ERR") .. "|" .. tostring(res):gsub("[\r\n]+", " "))
+  write_resp(id, ok, res)
 end)
 
-wr(DIR .. "resp.txt", "boot|OK|ddbridge ready")
-log.info(TAG .. "v1.86.0 ready (item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")
+write_resp("boot", true, "ddbridge ready")
+log.info(TAG .. "v1.89.2 ready (session guard, atomic responses, item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")

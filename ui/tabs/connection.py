@@ -1,24 +1,38 @@
 """Connection tab: find the game, install REFramework + ddbridge.lua, launch, connect."""
+import glob
 import os
 import re
 import shutil
-import threading
+import subprocess
+import tempfile
 import time
+import urllib.request
+import zipfile
+
 import customtkinter as ctk
 
+from bridge import safety
+from bridge.enums import parse_enums
 from bridge.game_path import (
-    find_data_dir, data_dir_or_raise, game_dir_from_data_dir,
+    config_dir, find_data_dir, data_dir_or_raise, game_dir_from_data_dir,
     bundled_lua_path, bundled_lua_version,
     get_custom_exe, set_custom_exe, clear_custom_exe, game_exe_name,
 )
 from bridge.protocol import BridgeClient, BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
-from ui.widgets import Card, card_content, H1, Muted, PrimaryButton, GhostButton
+from ui.widgets import Card, card_content, H1, Muted, PrimaryButton, GhostButton, run_async, Tooltip
+from version import BRIDGE_MAJOR, BRIDGE_VERSION, CLIENT_VERSION
 
-EXPECTED_MAJOR = "1.89"  # must match ddbridge.lua's pong
 REFRAMEWORK_URL = ("https://github.com/praydog/REFramework-nightly/releases/"
                    "latest/download/REFramework.zip")
+# Nightly is deliberately tracked so title updates keep working; there is no
+# stable checksum to pin. We trust GitHub's TLS, validate the zip, assert a
+# plausible DLL size, and keep a backup before replacing anything.
 DD2_STEAM_APPID = "2054970"
+# dinput8.dll is several MB; a tiny file means an HTML error page or a
+# truncated zip, so refuse to install it over a working copy.
+REFW_MIN_BYTES = 200_000
 
 
 def installed_lua_version(path):
@@ -38,95 +52,98 @@ def installed_lua_version(path):
 def game_running():
     if os.name != "nt":
         return False
-    import subprocess
     name = game_exe_name()
     try:
+        # Windowed PyInstaller builds must not flash a console for tasklist.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"],
-                             capture_output=True, text=True, timeout=10).stdout
+                             capture_output=True, text=True, timeout=10,
+                             creationflags=flags).stdout
         return name.lower() in out.lower()
     except Exception:
         return False
 
 
-def download_reframework(game_dir, progress_cb):
-    """Download REFramework.zip and extract ONLY dinput8.dll (per the release notes)."""
-    import urllib.request
-    import zipfile
-    import tempfile
-
-    def _hook(blocks, block_size, total):
-        if total > 0:
-            pct = min(100, blocks * block_size * 100 // total)
-            progress_cb(f"Downloading REFramework... {pct}%")
-
-    progress_cb("Downloading REFramework...")
-    tmp = tempfile.mktemp(suffix=".zip")
-    try:
-        urllib.request.urlretrieve(REFRAMEWORK_URL, tmp, reporthook=_hook)
-        progress_cb("Installing REFramework...")
-        with zipfile.ZipFile(tmp, "r") as z:
-            name = next((n for n in z.namelist()
-                         if n.lower().endswith("dinput8.dll")), None)
-            if not name:
-                raise RuntimeError("dinput8.dll not found in REFramework.zip")
-            with open(os.path.join(game_dir, "dinput8.dll"), "wb") as f:
-                f.write(z.read(name))
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+def _download(url, dest, progress_cb):
+    """Download url to dest with a timeout and progress reporting."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": f"ArisensToolbox/{CLIENT_VERSION}"})
+    with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as out:
+        total = int(resp.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if total:
+                pct = min(100, done * 100 // total)
+                progress_cb(f"Downloading REFramework... {pct}%")
 
 
-def parse_enums(text):
-    """Parse enums.txt (key\\tvalue\\tname lines) into the structure tabs need."""
-    E = {}
-    for line in text.splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) == 3 and parts[1].lstrip("-").isdigit():
-            E.setdefault(parts[0], []).append({"v": int(parts[1]), "n": parts[2]})
-
-    def per_job(entries, strip, others=False):
-        jobs = [{"labels": ["(none)"], "ids": [0]} for _ in range(10)]
-        extra = []
-        import re
-        for ent in entries or []:
-            m = re.match(r"^Job(\d\d)_", ent["n"])
-            j = int(m.group(1)) if m else 0
-            if 1 <= j <= 10:
-                t = jobs[j - 1]
-                label = re.sub(r"^Job\d\d_", "", ent["n"]) if strip else ent["n"]
-                t["labels"].append(label)
-                t["ids"].append(ent["v"])
-            elif others and ent["v"] != 0:
-                extra.append(ent)
-        for t in jobs:
-            for ent in extra:
-                t["labels"].append("[other] " + ent["n"])
-                t["ids"].append(ent["v"])
-        return jobs
-
-    import re
-    data = {
-        "jobsCustom": per_job(E.get("custom"), True),
-        "jobsNormal": per_job(E.get("normal"), True),
-        "jobsAbility": per_job(E.get("ability"), False, True),
-        "customName": {e["v"]: re.sub(r"^Job\d\d_", "", e["n"]) for e in E.get("custom", [])},
-        "normalName": {e["v"]: re.sub(r"^Job\d\d_", "", e["n"]) for e in E.get("normal", [])},
-        "equipList": [(e["v"], e["n"]) for e in E.get("equipskill", [])],
-        "equipName": {e["v"]: e["n"] for e in E.get("equipskill", [])},
-        "enhLabels": [f"{e['n']} ({e['v']})" for e in E.get("enhance", [])],
-        "enhVals": [e["v"] for e in E.get("enhance", [])],
-        "levelLabels": [f"{e['n']} ({e['v']})" for e in E.get("level", [])],
-        "levelValues": [e["v"] for e in E.get("level", [])],
-    }
-    if not data["levelValues"]:
-        data["levelLabels"] = ["0", "1", "2"]
-        data["levelValues"] = [0, 1, 2]
+def _extract_dinput8(zip_path):
+    """Return the dinput8.dll bytes from REFramework.zip, or raise."""
+    with zipfile.ZipFile(zip_path, "r") as z:
+        bad = z.testzip()
+        if bad:
+            raise RuntimeError(f"REFramework.zip is corrupt ({bad})")
+        name = next((n for n in z.namelist()
+                     if n.lower().endswith("dinput8.dll")), None)
+        if not name:
+            raise RuntimeError("dinput8.dll not found in REFramework.zip")
+        data = z.read(name)
+    if len(data) < REFW_MIN_BYTES:
+        raise RuntimeError(
+            f"dinput8.dll looks invalid ({len(data)} bytes) - download aborted")
     return data
 
 
-class ConnectionTab(ctk.CTkFrame):
+def _backup_dll(dest):
+    """Back up dest to a single ``.bak`` file, replaced on the next update."""
+    backup = dest + ".bak"
+    shutil.copy2(dest, backup)
+    # Drop any timestamped backups left by older builds: one .bak policy.
+    for old in glob.glob(dest + ".bak-*"):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    return backup
+
+
+def download_reframework(game_dir, progress_cb):
+    """Download REFramework.zip and extract ONLY dinput8.dll (per the release notes).
+
+    The existing DLL is backed up first and the new one is swapped in with
+    os.replace, so a failed download can never leave a broken install.
+    """
+    progress_cb("Downloading REFramework...")
+    tmp_zip = None
+    tmp_dll = os.path.join(game_dir, "dinput8.dll.new")
+    try:
+        fd, tmp_zip = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        _download(REFRAMEWORK_URL, tmp_zip, progress_cb)
+        progress_cb("Installing REFramework...")
+        data = _extract_dinput8(tmp_zip)
+        with open(tmp_dll, "wb") as f:
+            f.write(data)
+        dest = os.path.join(game_dir, "dinput8.dll")
+        if os.path.isfile(dest):
+            backup = _backup_dll(dest)
+            progress_cb(f"Backed up the old dinput8.dll to {os.path.basename(backup)}")
+        os.replace(tmp_dll, dest)
+    finally:
+        for path in (tmp_zip, tmp_dll):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+class ConnectionTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -181,7 +198,36 @@ class ConnectionTab(ctk.CTkFrame):
             "The client talks to the game through text files in\n"
             "reframework/data/ddbridge/ - no memory scanning."
         )
-        Muted(self, help_text, row=3, column=0, sticky="w", pady=(8, 0))
+        Muted(self, help_text, row=4, column=0, sticky="w", pady=(8, 0))
+
+        # saves & tools card (v0.92)
+        card3 = Card(self, row=3, column=0, sticky="ew", padx=4, pady=6)
+        cc3 = card_content(card3)
+        ctk.CTkLabel(cc3, **T.body("Saves & tools")).grid(
+            row=0, column=0, sticky="w", pady=(0, 6))
+        srow = ctk.CTkFrame(cc3, fg_color="transparent")
+        srow.grid(row=1, column=0, sticky="w")
+        GhostButton(srow, text="Backup saves now", width=150,
+                    command=self.backup_now).pack(side="left", padx=(0, 8))
+        _restore = GhostButton(srow, text="Restore backup", width=130,
+                    command=self.restore_backup)
+        _restore.pack(side="left", padx=(0, 8))
+        Tooltip(_restore, "Overwrites your live DD2 save with the newest "
+                          "backup. Close the game first. Your current save "
+                          "is backed up first, so this is undoable.")
+        GhostButton(srow, text="Export diagnostics", width=150,
+                    command=self.export_diagnostics).pack(side="left", padx=(0, 8))
+        srow2 = ctk.CTkFrame(cc3, fg_color="transparent")
+        srow2.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        GhostButton(srow2, text="Clean dump files", width=150,
+                    command=self.clean_dumps).pack(side="left", padx=(0, 8))
+        GhostButton(srow2, text="Reset installed files", width=170,
+                    command=self.reset_installed).pack(side="left")
+        self.saves_var = ctk.StringVar(value="")
+        ctk.CTkLabel(cc3, textvariable=self.saves_var,
+                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
+            row=3, column=0, sticky="w", pady=(8, 0))
+        self._refresh_saves_label()
 
         self.detect()
 
@@ -206,7 +252,11 @@ class ConnectionTab(ctk.CTkFrame):
                        ("Executables", "*.exe"),
                        ("All files", "*.*")])
         if f:
-            set_custom_exe(f)
+            try:
+                set_custom_exe(f)
+            except OSError as e:
+                self.app.set_status(f"Could not save the game path: {e}")
+                return
             self.detect()
             self.app.set_status(f"Using {f} - press Start.")
 
@@ -214,9 +264,165 @@ class ConnectionTab(ctk.CTkFrame):
         clear_custom_exe()
         self.detect()
 
+    # -- saves & tools (v0.92) -------------------------------------------
+
+    def _refresh_saves_label(self):
+        try:
+            backups = safety.list_backups()
+            remotes = safety.find_save_remote_dirs()
+            if remotes:
+                self.saves_var.set(
+                    f"Save folder: {remotes[0]}  |  backups: {len(backups)}")
+            else:
+                self.saves_var.set(
+                    "Save folder not found yet (Steam userdata) - automatic "
+                    "backups start once it is detected.")
+        except Exception:
+            self.saves_var.set("")
+
+    def backup_now(self):
+        def _do():
+            try:
+                dest = safety.backup_saves()
+                msg = (f"Save backed up to {dest}" if dest else
+                       "No DD2 save folder found - nothing to back up.")
+            except Exception as e:
+                msg = f"Backup failed: {e}"
+            err = msg
+            self.after(0, lambda: (self.app.set_status(err),
+                                   self._refresh_saves_label()))
+        run_async(self, _do)
+
+    def restore_backup(self):
+        import tkinter.messagebox as messagebox
+        backups = safety.list_backups()
+        if not backups:
+            self.app.set_status("No backups to restore yet.")
+            return
+        if game_running():
+            self.app.set_status(
+                "Close DD2 first - restoring over a running game's save "
+                "is not safe.")
+            return
+        newest = backups[0]
+        if not messagebox.askyesno(
+                "Restore backup",
+                f"Restore the newest backup?\n\n{newest}\n\n"
+                "Your current save is backed up first, so this is "
+                "undoable."):
+            return
+        def _do():
+            try:
+                live, _pre = safety.restore_backup(newest)
+                msg = f"Restored {os.path.basename(newest)} -> {live}"
+            except Exception as e:
+                msg = f"Restore failed: {e}"
+            err = msg
+            self.after(0, lambda: (self.app.set_status(err),
+                                   self._refresh_saves_label()))
+        run_async(self, _do)
+
+    def export_diagnostics(self):
+        from tkinter import filedialog
+        default = os.path.join(
+            config_dir(), f"arisens-diagnostics-{time.strftime('%Y%m%d-%H%M%S')}.zip")
+        out = filedialog.asksaveasfilename(
+            title="Export diagnostics bundle",
+            defaultextension=".zip",
+            filetypes=[("Zip archive", "*.zip")],
+            initialdir=os.path.dirname(default),
+            initialfile=os.path.basename(default))
+        if not out:
+            return
+        client = self.app.client
+        game_dir = None
+        try:
+            game_dir = game_dir_from_data_dir(
+                getattr(self, "data_dir", None) or data_dir_or_raise())
+        except Exception:
+            pass
+        def _do():
+            try:
+                safety.make_diagnostics_zip(
+                    out,
+                    versions={"client": CLIENT_VERSION,
+                              "bridge_bundled": BRIDGE_VERSION},
+                    client=client, game_dir=game_dir,
+                    log_path=getattr(self.app, "log_path", None))
+                msg = f"Diagnostics bundle written: {out}"
+            except Exception as e:
+                msg = f"Diagnostics export failed: {e}"
+            err = msg
+            self.after(0, lambda: self.app.set_status(err))
+        run_async(self, _do)
+
+    def clean_dumps(self):
+        data_dir = getattr(self, "data_dir", None)
+        if not data_dir:
+            self.app.set_status("Game folder not detected yet.")
+            return
+        removed = safety.cleanup_sidecars(data_dir)
+        self.app.set_status(
+            f"Removed {len(removed)} dump file(s) from the bridge data "
+            "folder." if removed else "No dump files to clean.")
+
+    def reset_installed(self):
+        import tkinter.messagebox as messagebox
+        if game_running():
+            self.app.set_status(
+                "Close DD2 first - installed files are locked while the "
+                "game runs.")
+            return
+        try:
+            game_dir = game_dir_from_data_dir(
+                getattr(self, "data_dir", None) or data_dir_or_raise())
+        except Exception as e:
+            self.app.set_status(str(e))
+            return
+        if not messagebox.askyesno(
+                "Reset installed files",
+                "Remove the installed ddbridge.lua (restoring its .bak "
+                "if one exists) and restore the dinput8.dll .bak if one "
+                "exists?\n\nThe game itself is not touched."):
+            return
+        done = []
+        lua_dest = os.path.join(
+            game_dir, "reframework", "autorun", "ddbridge.lua")
+        try:
+            if os.path.isfile(lua_dest + ".bak"):
+                os.replace(lua_dest + ".bak", lua_dest)
+                done.append("ddbridge.lua restored from .bak")
+            elif os.path.isfile(lua_dest):
+                os.remove(lua_dest)
+                done.append("ddbridge.lua removed")
+        except OSError as e:
+            self.app.set_status(f"Could not reset ddbridge.lua: {e}")
+            return
+        dll = os.path.join(game_dir, "dinput8.dll")
+        try:
+            if os.path.isfile(dll + ".bak"):
+                os.replace(dll + ".bak", dll)
+                done.append("dinput8.dll restored from .bak")
+        except OSError as e:
+            self.app.set_status(f"Could not restore dinput8.dll: {e}")
+            return
+        self.app.set_status(
+            "Reset installed files: " + ("; ".join(done) if done else
+                                         "nothing to do."))
+
     def start_async(self):
         self.connect_btn.configure(state="disabled", text="Working...")
-        threading.Thread(target=self._start, daemon=True).start()
+
+        def _worker():
+            try:
+                self._start()
+            except Exception:
+                # Never leave the Start button stuck on "Working..." if a
+                # worker dies somewhere _start does not expect.
+                self._done(False, "Unexpected error - see the log file.")
+                raise
+
+        run_async(self, _worker)
 
     def _status(self, msg):
         self.after(0, lambda: (self.info_var.set(msg), self.app.set_status(msg)))
@@ -270,7 +476,13 @@ class ConnectionTab(ctk.CTkFrame):
             try:
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 if os.path.isfile(dest):
-                    shutil.copy2(dest, dest + f".bak-{iver or 'unknown'}")
+                    # Single .bak, replaced on the next update (v0.92).
+                    shutil.copy2(dest, dest + ".bak")
+                    for old in glob.glob(dest + ".bak-*"):
+                        try:
+                            os.remove(old)
+                        except OSError:
+                            pass
                 shutil.copy2(src, dest)
                 changed.append(
                     f"ddbridge.lua v{bver} installed"
@@ -327,9 +539,10 @@ class ConnectionTab(ctk.CTkFrame):
             return
 
         # 6. Version check.
-        if EXPECTED_MAJOR not in pong:
+        m = re.search(r"pong\s+ddbridge\s+(\d+\.\d+\.\d+)", pong or "")
+        if not m or not m.group(1).startswith(BRIDGE_MAJOR + "."):
             self._done(False,
-                f"Version mismatch: game says '{pong}', client expects {EXPECTED_MAJOR}. "
+                f"Version mismatch: game says '{pong}', client expects {BRIDGE_MAJOR}.x. "
                 "Press Start again to update the game files.")
             return
 
@@ -337,7 +550,9 @@ class ConnectionTab(ctk.CTkFrame):
         self.app.set_client(client)
         try:
             n = client.send("list_enums", timeout=60)
-            self.app.enum_data = parse_enums(client.read_sidecar("enums.txt") or "")
+            _enums_text = client.read_sidecar("enums.txt") or ""
+            self.app.enum_data = parse_enums(_enums_text)
+            self.app.cache_sidecar("enums.txt", _enums_text)
             enum_msg = f", {n} enum entries"
         except (BridgeError, BridgeTimeout) as e:
             enum_msg = f" (enum load failed: {e})"

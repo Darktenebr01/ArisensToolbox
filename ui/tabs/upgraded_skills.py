@@ -2,6 +2,7 @@
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
     run_async, require_client,
@@ -10,7 +11,7 @@ from ui.widgets import (
 )
 
 
-class UpgradedSkillsTab(ctk.CTkFrame):
+class UpgradedSkillsTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app

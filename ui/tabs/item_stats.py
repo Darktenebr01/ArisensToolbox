@@ -5,9 +5,10 @@ import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton,
+    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
     Field, Combo, StyledListbox, run_async, require_client, show_probe,
 )
 
@@ -23,7 +24,7 @@ SPECIAL_NAMES = {
 }
 
 
-class ItemStatsTab(ctk.CTkFrame):
+class ItemStatsTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -56,8 +57,8 @@ class ItemStatsTab(ctk.CTkFrame):
         trow.grid(row=2, column=0, sticky="w")
         GhostButton(trow, text="Read character totals", width=170,
                     command=self.read_totals).pack(side="left", padx=(0, 8))
-        GhostButton(trow, text="DUMP all item fields", width=170,
-                    command=self.dump_fields).pack(side="left")
+        dev_only(self, lambda: GhostButton(trow, text="DUMP all item fields", width=170,
+                    command=self.dump_fields).pack(side="left"))
         GhostButton(trow, text="Sweep all specials", width=150,
                     command=self.sweep_specials).pack(side="left", padx=8)
 
@@ -148,8 +149,8 @@ class ItemStatsTab(ctk.CTkFrame):
                     command=self.read_special).pack(side="left", padx=(0, 8))
         PrimaryButton(sctl, text="Apply", width=120,
                       command=self.apply_special).pack(side="left", padx=8)
-        GhostButton(sctl, text="Probe effect names", width=160,
-                    command=self.probe_special).pack(side="left", padx=8)
+        dev_only(self, lambda: GhostButton(sctl, text="Probe effect names", width=160,
+                    command=self.probe_special).pack(side="left", padx=8))
 
         # refresh the label whenever this tab becomes visible
         self.bind("<Map>", self._on_map)

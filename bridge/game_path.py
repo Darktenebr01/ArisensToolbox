@@ -63,21 +63,55 @@ def _from_steam_libraries():
     return None
 
 
-def _client_base():
-    """Folder the client lives in (writable spot for small settings files)."""
+def _legacy_base():
+    """Folder older builds used for settings (next to the exe)."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def config_dir():
+    """Per-user writable folder for settings, logs and caches.
+
+    Writing next to the exe breaks when the app lives in Program Files, so
+    use %LOCALAPPDATA%\\ArisensToolbox by default. ARISENS_CONFIG_DIR exists
+    for tests and portable installs.
+    """
+    base = os.environ.get("ARISENS_CONFIG_DIR")
+    if not base:
+        base = os.path.join(os.environ.get("LOCALAPPDATA") or
+                            os.path.expanduser("~"), "ArisensToolbox")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    return base
+
+
 def _custom_exe_file():
-    return os.path.join(_client_base(), "dd2_exe.txt")
+    return os.path.join(config_dir(), "dd2_exe.txt")
+
+
+def _legacy_exe_file():
+    return os.path.join(_legacy_base(), "dd2_exe.txt")
 
 
 def get_custom_exe():
     """Full path to a user-picked game exe, or None."""
+    path = _custom_exe_file()
+    if not os.path.isfile(path):
+        # Migrate the old next-to-the-exe setting once.
+        legacy = _legacy_exe_file()
+        if os.path.isfile(legacy):
+            try:
+                with open(legacy, "r", encoding="utf-8") as f:
+                    old = f.read().strip()
+                if old and os.path.isfile(old):
+                    set_custom_exe(old)
+            except OSError:
+                pass
     try:
-        with open(_custom_exe_file(), "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             p = f.read().strip()
     except OSError:
         return None
@@ -87,15 +121,25 @@ def get_custom_exe():
 
 
 def set_custom_exe(path):
-    with open(_custom_exe_file(), "w", encoding="utf-8") as f:
-        f.write(path)
+    dest = _custom_exe_file()
+    tmp = f"{dest}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(os.path.abspath(path))
+        os.replace(tmp, dest)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def clear_custom_exe():
-    try:
-        os.remove(_custom_exe_file())
-    except OSError:
-        pass
+    for path in (_custom_exe_file(), _legacy_exe_file()):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def game_exe_name():

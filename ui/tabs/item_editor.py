@@ -5,16 +5,17 @@ import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton,
+    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
     Field, Combo, Check, StyledListbox, run_async, require_client, show_probe,
 )
 
 MAX_SHOWN = 400
 
 
-class ItemEditorTab(ctk.CTkFrame):
+class ItemEditorTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -203,10 +204,10 @@ class ItemEditorTab(ctk.CTkFrame):
                       command=self.apply_item_name).pack(side="left")
         GhostButton(nrow, text="Clear name", width=110,
                     command=self.clear_item_name).pack(side="left", padx=8)
-        GhostButton(nrow, text="DIAG name", width=100,
-                    command=self.diag_item_name).pack(side="left")
-        GhostButton(nrow, text="PROBE type", width=100,
-                    command=self.probe_item_type).pack(side="left", padx=8)
+        dev_only(self, lambda: GhostButton(nrow, text="DIAG name", width=100,
+                    command=self.diag_item_name).pack(side="left"))
+        dev_only(self, lambda: GhostButton(nrow, text="PROBE type", width=100,
+                    command=self.probe_item_type).pack(side="left", padx=8))
         Muted(cc, "Renames all items of this type in game (names are shared "
               "per item type). The rename is re-applied when the inventory "
               "loads. Clear removes the saved rename; restart the game to "
@@ -220,18 +221,18 @@ class ItemEditorTab(ctk.CTkFrame):
         H2(cc, "Probes", row=0, column=0, sticky="w", pady=(0, 6))
         prow = ctk.CTkFrame(cc, fg_color="transparent")
         prow.grid(row=1, column=0, sticky="ew")
-        GhostButton(prow, text="DUMP ability rules", width=170,
+        dev_only(self, lambda: GhostButton(prow, text="DUMP ability rules", width=170,
                     command=lambda: self.run_probe_cmd(
                         "abil_dump", "abildump.txt",
-                        "Ability rule dump - copy all of it")).pack(side="left", padx=(0, 6))
-        GhostButton(prow, text="DUMP appraisal rules (2)", width=190,
+                        "Ability rule dump - copy all of it")).pack(side="left", padx=(0, 6)))
+        dev_only(self, lambda: GhostButton(prow, text="DUMP appraisal rules (2)", width=190,
                     command=lambda: self.run_probe_cmd(
                         "abil_dump2", "abildump2.txt",
-                        "Appraisal rule dump - copy all of it")).pack(side="left", padx=6)
-        GhostButton(prow, text="DUMP ability data + probe (3)", width=230,
+                        "Appraisal rule dump - copy all of it")).pack(side="left", padx=6))
+        dev_only(self, lambda: GhostButton(prow, text="DUMP ability data + probe (3)", width=230,
                     command=lambda: self.run_probe_cmd(
                         "abil_dump3", "abildump3.txt",
-                        "Ability data dump 3 - copy all of it (can take a while)")).pack(side="left", padx=6)
+                        "Ability data dump 3 - copy all of it (can take a while)")).pack(side="left", padx=6))
 
     # -- owners -------------------------------------------------------
 

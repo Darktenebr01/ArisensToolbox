@@ -1,18 +1,19 @@
 """Item Giver tab: load the game's item list, search, give to inventory/storage."""
-import threading
 import tkinter as tk
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
     Card, card_content, H1, PrimaryButton, GhostButton, Field, StyledListbox,
+    run_async,
 )
 
 MAX_SHOWN = 300
 
 
-class ItemGiverTab(ctk.CTkFrame):
+class ItemGiverTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -31,8 +32,10 @@ class ItemGiverTab(ctk.CTkFrame):
         srow.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ctk.CTkLabel(srow, **T.body("Search (name or ID):")).pack(side="left")
         self.search_var = ctk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self.refresh_list())
-        Field(srow, textvariable=self.search_var, width=320).pack(side="left", padx=8)
+        self._search_after = None
+        self.search_var.trace_add("write", lambda *_: self._debounced_refresh())
+        self.search_field = Field(srow, textvariable=self.search_var, width=320)
+        self.search_field.pack(side="left", padx=8)
         PrimaryButton(
             srow, text="Load / reload item list", width=180,
             command=self.load_items_async,
@@ -78,16 +81,48 @@ class ItemGiverTab(ctk.CTkFrame):
         return self.app.client
 
     def _run(self, fn):
-        threading.Thread(target=fn, daemon=True).start()
+        run_async(self, fn)
 
     # -- actions ------------------------------------------------------
 
+    def focus_search(self):
+        try:
+            self.search_field.focus_set()
+        except Exception:
+            pass
+
+    def _debounced_refresh(self):
+        """Rebuild the list 150 ms after the last keystroke, not per key."""
+        if self._search_after is not None:
+            try:
+                self.after_cancel(self._search_after)
+            except Exception:
+                pass
+        self._search_after = self.after(150, self.refresh_list)
+
     def load_items_async(self):
-        client = self._require_client()
+        client = self.app.client
         if not client:
+            # Offline: fall back to the on-disk cache from a previous
+            # session so the list stays browsable without the game.
+            text = self.app.read_cached_sidecar("items.txt")
+            if text:
+                self._fill_items(text, "cache (offline)")
             return
         self.app.set_status("Loading the item list from the game...")
         self._run(lambda: self._load_items(client))
+
+    def _fill_items(self, text, source):
+        items = []
+        for line in text.splitlines():
+            if "\t" not in line:
+                continue
+            sid, name = line.split("\t", 1)
+            if sid.strip().isdigit():
+                items.append((int(sid), name.strip(), name.strip().lower()))
+        self.items = items
+        self.refresh_list()
+        self.app.set_status(f"Loaded {len(items)} items from {source}.")
 
     def _load_items(self, client):
         try:
@@ -95,6 +130,7 @@ class ItemGiverTab(ctk.CTkFrame):
             text = client.read_sidecar("items.txt")
             if not text:
                 raise BridgeError("items.txt missing")
+            self.app.cache_sidecar("items.txt", text)
             items = []
             for line in text.splitlines():
                 if "\t" not in line:

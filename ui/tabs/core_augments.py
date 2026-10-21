@@ -3,15 +3,16 @@ import re
 import tkinter as tk
 import customtkinter as ctk
 
+from ui.base import BaseTab
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.widgets import (
     run_async, require_client, show_probe,
     Card, card_content, H1, Muted,
-    PrimaryButton, GhostButton, Combo, StyledListbox,
+    PrimaryButton, GhostButton, dev_only, Combo, StyledListbox,
 )
 
 
-class CoreAugmentsTab(ctk.CTkFrame):
+class CoreAugmentsTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -51,8 +52,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
         GhostButton(nbtn2, "Enable ALL incl. unprefixed",
                     command=lambda: self.enable_all_async(True),
                     width=200).pack(side="left")
-        GhostButton(nbtn2, "DUMP core skill data", command=self.core_dump_async,
-                    width=170).pack(side="left", padx=6)
+        dev_only(self, lambda: GhostButton(nbtn2, "DUMP core skill data", command=self.core_dump_async,
+                    width=170).pack(side="left", padx=6))
 
         # ---- right: augments ----
         aug_card = Card(self, row=1, column=1, sticky="nsew", padx=4, pady=6)
@@ -66,8 +67,8 @@ class CoreAugmentsTab(ctk.CTkFrame):
         PrimaryButton(aug, "Unlock ALL augments (vocation + other)",
                       command=self.unlock_augments_async,
                       width=300).grid(row=6, column=0, sticky="w", pady=(8, 3))
-        GhostButton(aug, "DUMP augment data", command=self.augment_dump_async,
-                    width=200).grid(row=7, column=0, sticky="w", pady=3)
+        dev_only(self, lambda: GhostButton(aug, "DUMP augment data", command=self.augment_dump_async,
+                    width=200).grid(row=7, column=0, sticky="w", pady=3))
         Muted(aug, "Augments with no JobNN_ prefix are listed\nas [other] in every dropdown.",
               row=8, column=0, sticky="w", pady=6)
 
@@ -140,6 +141,11 @@ class CoreAugmentsTab(ctk.CTkFrame):
     def enable_all_async(self, incl_other):
         client = require_client(self.app)
         if not client:
+            return
+        if not self.app.confirm_bulk(
+                "Enable all core skills",
+                "This writes to your save: all core skills for the "
+                "selected vocation will be enabled."):
             return
         tgt, job = self.app.target(), self.app.job()
         args = (tgt, job, "all") if incl_other else (tgt, job)
@@ -233,6 +239,11 @@ class CoreAugmentsTab(ctk.CTkFrame):
     def unlock_augments_async(self):
         client = require_client(self.app)
         if not client:
+            return
+        if not self.app.confirm_bulk(
+                "Unlock all augments",
+                "This writes to your save: all augments for the selected "
+                "vocation will be unlocked."):
             return
         tgt, job = self.app.target(), self.app.job()
         run_async(self, lambda: self._do_unlock_augments(client, tgt, job))

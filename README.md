@@ -25,6 +25,8 @@ no AOB patterns**, so it keeps working after Capcom title updates.
 
 ## Changelog
 
+- **v0.92** - Save protection + UX + cuts (bridge v1.89.2): automatic save backup before the first save-writing command of a session (Steam `userdata\<id>\2054970\remote` copied to `%LOCALAPPDATA%\ArisensToolbox\backups`, last 10 kept), plus Backup now / Restore backup (restore backs up the current save first) on the Connection tab; "Undo last change" for edits that record their previous value (rating, badges incl. fill, vocation, renames, weapon-skill level); confirm prompts with counts for bulk writes (unlock all vocations / weapon skills / core skills / augments, fill badges); Export diagnostics (.zip with versions, game build, last 200 commands with timings, log tail). Connection heartbeat dot with auto-reconnect; last tab / window / target / vocation are remembered; item search debounced (150 ms); Item Giver falls back to the on-disk items/enums cache offline; tooltips on save-writing buttons; Ctrl+F search, F5 refresh, Esc closes dialogs, Ctrl+Z undo; Clean dump files + Reset installed files. Cuts: the Signatures tab and the Lua `fn_addr` command are deleted; 19 probe/diagnostic buttons moved to dev mode (`DD2BRIDGE_DEV=1`); `ddbridge.lua` and `dinput8.dll` backups are a single `.bak`, replaced on update. Also fixes the one mixed-version trap in v0.91: a pre-1.89.1 bridge still answers `ping`, so the version check reports the old bridge instead of a 5-minute timeout.
+- **v0.91** - Reliability hardening: one version source (`version.py`); per-game-session boot token rejects replayed `cmd.txt` commands; responses carry an `|END` sentinel and are written temp+rename where possible; UI callbacks are marshalled to the Tk main thread; the REFramework installer validates the zip, backs up the old `dinput8.dll` and swaps atomically; settings and logs live in `%LOCALAPPDATA%\ArisensToolbox`; bridge v1.89.1. Adds CI and unit tests.
 - **v0.90** — Weapon Skills cleanup: removed the temporary diagnostic buttons (Probe skill detail, Dump enabled list, Try fix selected). Kept Probe levels/upgrades, equipment probes, and Add missing entry. Lua unchanged at v1.89.0.
 - **v0.89** — SmokeGiants: "Add missing entry" — if the skill has no EnabledCustomSkills entry (120 has none while all others do), create one (CustomSkillID + Level) and List.Add it, with read-backs; if an entry exists, set its Level field.
 - **v0.88** — SmokeGiants follow-up: read-only "Dump enabled list" (every EnabledCustomSkills entry + ReachLevel) + "Try fix selected" (prepareEnableCustomSkillList, then enable, then level-up + enable again, with read-backs and a check that no other skill changed).
@@ -80,6 +82,15 @@ python main.py
 
 Or double-click `run.bat` (installs dependencies automatically).
 
+## Tests
+
+```
+python -m unittest discover -s tests -v
+```
+
+CI runs those tests on Windows and syntax-checks `ddbridge.lua` with Lua 5.4
+on Linux; see `.github/workflows/ci.yml`.
+
 ## Build the .exe (Windows)
 
 Double-click `build.bat` — installs PyInstaller via pip and builds
@@ -88,11 +99,20 @@ first run installs REFramework itself.
 
 ## Protocol
 
-- Client writes `{id}|{command}|{arg1}|...|END` to `cmd.txt` (atomic tmp+replace,
-  one in-flight command at a time).
-- `ddbridge.lua` (REFramework, in-game) polls ~10x/sec and writes
-  `{id}|OK|{payload}` or `{id}|ERR|{msg}` to `resp.txt`.
+- `ddbridge.lua` (REFramework, in-game) polls ~10x/sec. `ping` returns
+  `pong ddbridge 1.89.1 boot={token}`, where the token is unique to that
+  game process.
+- Client writes `{id}|{command}|{arg}|...|B:{token}|END` to `cmd.txt`
+  (atomic tmp+replace, one in-flight command at a time). Commands carrying a
+  stale or missing token are rejected with `STALE_SESSION` without being
+  executed; the client re-pings and retries once.
+- The game writes `{id}|OK|{payload}|END` or `{id}|ERR|{msg}|END` to
+  `resp.txt`, temp+rename where possible. The `|END` sentinel makes a
+  truncated read detectable, so a partial payload is never treated as a
+  successful result.
 - Bulk data (item lists, dumps) travels through sidecar files in the same dir.
+- Settings and logs: `%LOCALAPPDATA%\ArisensToolbox` (`logs\client.log`).
+  Set `ARISENS_CONFIG_DIR` to override the folder for a portable install.
 
 ## Credits
 

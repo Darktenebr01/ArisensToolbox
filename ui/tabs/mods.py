@@ -2,9 +2,10 @@
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
+from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton,
+    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
     Field, Check, run_async, require_client, show_probe,
 )
 
@@ -13,7 +14,7 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-class ModsTab(ctk.CTkFrame):
+class ModsTab(BaseTab):
     def __init__(self, parent, app):
         super().__init__(parent, fg_color="transparent")
         self.app = app
@@ -82,8 +83,8 @@ class ModsTab(ctk.CTkFrame):
                     command=self.read_async).pack(side="left", padx=(0, 8))
         GhostButton(brow, text="Reset to game values", width=170,
                     command=self.reset_async).pack(side="left", padx=8)
-        GhostButton(brow, text="DUMP jump/fall data", width=180,
-                    command=self.probe_async).pack(side="left", padx=8)
+        dev_only(self, lambda: GhostButton(brow, text="DUMP jump/fall data", width=180,
+                    command=self.probe_async).pack(side="left", padx=8))
 
         self.info_var = ctk.StringVar(value="")
         ctk.CTkLabel(cc, textvariable=self.info_var,
@@ -239,8 +240,8 @@ class ModsTab(ctk.CTkFrame):
                       command=lambda: self.warp_async("warp_to_pin")).pack(side="left", padx=(0, 8))
         PrimaryButton(brow, text="Warp to quest marker", width=190,
                       command=lambda: self.warp_async("warp_to_quest")).pack(side="left", padx=8)
-        GhostButton(brow, text="Diagnose warp", width=140,
-                    command=self.warp_probe_async).pack(side="left", padx=8)
+        dev_only(self, lambda: GhostButton(brow, text="Diagnose warp", width=140,
+                    command=self.warp_probe_async).pack(side="left", padx=8))
 
         self.warp_var = ctk.StringVar(value="")
         ctk.CTkLabel(cc, textvariable=self.warp_var,
@@ -318,8 +319,8 @@ class ModsTab(ctk.CTkFrame):
                     command=self.respawn_reset_async).pack(side="left", padx=8)
         GhostButton(brow, text="--> Fast Forward 3 Days (Clear Corpses) <--", width=340,
                     command=self.respawn_clear_async).pack(side="left", padx=8)
-        GhostButton(brow, text="Diagnose time-skip", width=170,
-                    command=self.timeskip_probe_async).pack(side="left", padx=8)
+        dev_only(self, lambda: GhostButton(brow, text="Diagnose time-skip", width=170,
+                    command=self.timeskip_probe_async).pack(side="left", padx=8))
         GhostButton(brow, text="Dump time-skip sig", width=170,
                     command=self.timeskip_sig_async).pack(side="left", padx=8)
         GhostButton(brow, text="Dump time fields", width=150,
