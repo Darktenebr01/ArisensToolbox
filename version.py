@@ -6,10 +6,10 @@ and ``bridge/data/version.txt`` all agree with the values below.
 """
 
 # Desktop client version (shown in the sidebar, build artifacts, releases).
-CLIENT_VERSION = "0.92"
+CLIENT_VERSION = "0.93"
 
 # Game-side bridge version. Bump this whenever ddbridge.lua changes.
-BRIDGE_VERSION = "1.89.2"
+BRIDGE_VERSION = "1.89.3"
 
 # Older/newer patch releases of the bridge are accepted as long as the
 # protocol-compatible major version matches.

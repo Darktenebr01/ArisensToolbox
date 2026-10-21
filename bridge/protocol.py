@@ -56,9 +56,15 @@ class BridgeClient:
         # Diagnostics: last 200 commands with timings (see safety bundle).
         self.history = collections.deque(maxlen=200)
         # Set by the app: called once, right before the first mutating
-        # command of this session is written (save-backup hook).
+        # command of this session is written (save-backup hook). The hook
+        # may raise BridgeError to abort the command (e.g. the save backup
+        # itself failed); the hook then stays armed for the next attempt.
         self.on_before_first_mutation = None
         self._mutation_hook_done = False
+        # Set by the app: called when a ping shows a NEW boot token, i.e.
+        # the game restarted. Per-session state (undo history) must not
+        # leak into the new session.
+        self.on_session_changed = None
         # Do not replay a command that was left behind by the previous session.
         self._clear_cmd_file()
 
@@ -146,12 +152,23 @@ class BridgeClient:
         if m:
             self.bridge_version = m.group(1)
         m = BOOT_TOKEN_RE.search(pong or "")
-        if m:
-            self.boot_id = m.group(1)
-        else:
-            # Older Lua (pre-1.89.2) has no boot token. Keep working, but
-            # the server-side replay guard is unavailable.
-            self.boot_id = None
+        # Older Lua (pre-1.89.2) has no boot token (None). Keep working,
+        # but the server-side replay guard is unavailable.
+        new_boot = m.group(1) if m else None
+        if (new_boot is not None and self.boot_id is not None
+                and new_boot != self.boot_id):
+            # A different live token means the game restarted under us:
+            # the next mutation needs a fresh save backup, and the app
+            # must drop state tied to the old session (undo history).
+            log.info("boot token changed: new game session detected")
+            self._mutation_hook_done = False
+            callback = self.on_session_changed
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:
+                    log.exception("session-changed callback failed")
+        self.boot_id = new_boot
 
     def _read_resp_legacy(self, cmd_id):
         """One last-chance read for a pre-1.89.2 bridge (no |END sentinel).
@@ -213,6 +230,16 @@ class BridgeClient:
         except BridgeTimeout:
             log.warning("timeout after %.1fs: %s", timeout, command)
             self._record(command, args, started, "TIMEOUT")
+            if is_mutating(command):
+                # A mutating command must not sit in cmd.txt and execute
+                # later (game resumed, user moved on) after the UI already
+                # reported failure. Remove it; the game may still have
+                # picked it up, so say exactly that.
+                self._clear_cmd_file()
+                raise BridgeTimeout(
+                    f"No response to '{command}' within {timeout}s. The "
+                    "pending command was removed, but it may or may not "
+                    "have run - check in game before retrying.")
             raise
         except BridgeError as e:
             self._record(command, args, started, f"ERR {e}")
@@ -226,16 +253,18 @@ class BridgeClient:
         return payload
 
     def _maybe_mutation_hook(self, command):
-        """Fire the app's save-backup hook once per session, pre-mutation."""
+        """Fire the app's save-backup hook once per session, pre-mutation.
+
+        A BridgeError from the hook aborts the command (it is never
+        written) and leaves the hook armed, so the next mutating command
+        retries the backup instead of proceeding unprotected.
+        """
         if self._mutation_hook_done or not is_mutating(command):
             return
-        self._mutation_hook_done = True
         hook = self.on_before_first_mutation
         if hook is not None:
-            try:
-                hook(command)
-            except Exception:
-                log.exception("pre-mutation hook failed for %s", command)
+            hook(command)
+        self._mutation_hook_done = True
 
     def _do_ping(self, timeout):
         pong = self._send_once("ping", (), timeout, None)
@@ -266,12 +295,31 @@ class BridgeClient:
                 log.info("game session changed; reconnecting and retrying %s",
                          command)
                 self._do_ping(min(timeout, 8.0))
+                # The re-ping reset the backup hook for the new session;
+                # run it before the retried mutation goes out.
+                self._maybe_mutation_hook(command)
                 return self._send_once(command, args, timeout, self.boot_id)
 
     def ping(self, timeout=8.0):
         """Return the raw pong string, e.g. 'pong ddbridge 1.89.2 boot=...'."""
         with self._send_lock:
             return self._do_ping(timeout)
+
+    def try_ping(self, timeout=2.0):
+        """Heartbeat ping that never queues behind a running command.
+
+        Returns the pong string on success, ``False`` when another command
+        holds the send lock (beat skipped - not a failure), or ``None``
+        when the game did not answer.
+        """
+        if not self._send_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._do_ping(timeout)
+        except BridgeError:
+            return None
+        finally:
+            self._send_lock.release()
 
     def read_sidecar(self, filename):
         """Read a bulk-data sidecar file (items.txt, specialsweep.txt, ...)."""

@@ -16,7 +16,8 @@ class ClassificationTests(unittest.TestCase):
 
     def test_mutating_commands(self):
         for cmd in ("set_badge", "fill_badges", "item_apply", "give_item",
-                    "unlock_wskills", "warp_to_pin", "brand_new_command"):
+                    "unlock_wskills", "warp_to_pin", "brand_new_command",
+                    "timeskip_probe"):  # installs capture hooks in-game
             self.assertTrue(safety.is_mutating(cmd), cmd)
 
 
@@ -42,7 +43,11 @@ class SaveBackupTests(unittest.TestCase):
         self.assertIsNotNone(dest)
         self.assertEqual((Path(dest) / "data00-1.bin").read_bytes(),
                          b"save-bytes")
-        self.assertEqual(len(safety.list_backups()), 1)
+        backups = safety.list_backups()
+        regular = [b for b in backups if "pinned-" not in b]
+        pinned = [b for b in backups if "pinned-" in b]
+        self.assertEqual(len(regular), 1)
+        self.assertEqual(len(pinned), 1)  # first backup is pinned (v0.93)
 
     def test_restore_roundtrip_with_pre_restore_backup(self):
         dest = safety.backup_saves()
@@ -52,6 +57,49 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual((self.remote / "data00-1.bin").read_bytes(),
                          b"save-bytes")
         self.assertIsNotNone(pre)  # the corrupted state was kept too
+
+    def test_pinned_backup_survives_pruning(self):
+        for _ in range(12):
+            safety.backup_saves()
+        backups = safety.list_backups()
+        pinned = [b for b in backups if "pinned-" in b]
+        regular = [b for b in backups if "pinned-" not in b]
+        self.assertEqual(len(pinned), 1)
+        self.assertEqual(len(regular), safety.MAX_BACKUPS)
+
+    def test_restore_targets_the_backups_own_account(self):
+        root = Path(self.tmp.name)
+        remote_a = root / "userdata" / "111" / "2054970" / "remote"
+        remote_b = root / "userdata" / "222" / "2054970" / "remote"
+        for r in (remote_a, remote_b):
+            r.mkdir(parents=True, exist_ok=True)
+            (r / "data00-1.bin").write_bytes(b"save")
+        dest = safety.backup_saves(remote=str(remote_a))
+        self.assertTrue(dest.endswith("-111"))
+        (remote_a / "data00-1.bin").write_bytes(b"corrupted-a")
+        (remote_b / "data00-1.bin").write_bytes(b"live-b")
+        with mock.patch.object(
+                safety, "find_save_remote_dirs",
+                return_value=[str(remote_b), str(remote_a)]):
+            live, _pre = safety.restore_backup(dest)
+        self.assertEqual(Path(live), remote_a)
+        self.assertEqual((remote_a / "data00-1.bin").read_bytes(), b"save")
+        self.assertEqual((remote_b / "data00-1.bin").read_bytes(), b"live-b")
+
+    def test_restore_refuses_when_account_missing_and_ambiguous(self):
+        root = Path(self.tmp.name)
+        remote_a = root / "userdata" / "111" / "2054970" / "remote"
+        remote_b = root / "userdata" / "222" / "2054970" / "remote"
+        remote_c = root / "userdata" / "333" / "2054970" / "remote"
+        for r in (remote_a, remote_b, remote_c):
+            r.mkdir(parents=True, exist_ok=True)
+            (r / "data00-1.bin").write_bytes(b"save")
+        dest = safety.backup_saves(remote=str(remote_a))
+        with mock.patch.object(
+                safety, "find_save_remote_dirs",
+                return_value=[str(remote_b), str(remote_c)]):
+            with self.assertRaises(FileNotFoundError):
+                safety.restore_backup(dest)
 
     def test_no_save_dir_returns_none(self):
         with mock.patch.dict(os.environ, {"ARISENS_SAVE_DIR": ""}):
@@ -83,6 +131,16 @@ class CleanupAndBundleTests(unittest.TestCase):
                 self.assertIn("client.log", names)
                 self.assertIn("client: 0.92",
                               z.read("diagnostics.txt").decode())
+
+
+class CleanupTests(unittest.TestCase):
+    def test_itemnames_survives_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "itemnames.txt").write_text("names", encoding="utf-8")
+            Path(td, "items.txt").write_text("dump", encoding="utf-8")
+            removed = safety.cleanup_sidecars(td)
+            self.assertEqual(removed, ["items.txt"])
+            self.assertTrue(Path(td, "itemnames.txt").exists())
 
 
 if __name__ == "__main__":

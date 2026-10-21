@@ -181,8 +181,18 @@ class ItemGiverTab(BaseTab):
         except ValueError:
             self.app.set_status("Enter a numeric Item ID and Quantity.")
             return
-        if qty < 1:
-            self.app.set_status("Quantity must be at least 1.")
+        if qty < 1 or qty > 999:
+            self.app.set_status("Quantity must be between 1 and 999.")
+            return
+        if iid < 1:
+            self.app.set_status("Item ID must be a positive number.")
+            return
+        # When the item table is loaded, an unknown ID is a typo, not a
+        # discovery: refuse instead of writing a broken item into a save.
+        if self.items and iid not in {i for i, _n, _l in self.items}:
+            self.app.set_status(
+                f"Item ID {iid} is not in the loaded item list - check "
+                "the ID (load the list first if it is empty).")
             return
         self._run(lambda: self._give(client, iid, qty, to_storage))
 

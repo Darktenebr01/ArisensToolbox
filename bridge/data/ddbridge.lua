@@ -1,7 +1,7 @@
--- ddbridge.lua  v1.89.2  (Dragon's Dogma 2 / REFramework)
--- Command bridge for the "DD2 Bridge" Cheat Engine table.
+-- ddbridge.lua  v1.89.3  (Dragon's Dogma 2 / REFramework)
+-- Command bridge for the Arisen's Toolbox companion app.
 -- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
--- The Cheat Engine table writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
+-- The app writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
 -- INSIDE the game through REFramework and writes the answer to resp.txt (big lists go to items.txt).
 -- Only the fixed commands listed in COMMANDS below are accepted - it never runs text as code.
 
@@ -263,13 +263,15 @@ local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
 -- each command gets the argument list (strings) and returns a one-line string payload
 local COMMANDS = {}
 
-COMMANDS.ping = function() return "pong ddbridge 1.89.2 boot=" .. BOOT end
+COMMANDS.ping = function() return "pong ddbridge 1.89.3 boot=" .. BOOT end
 
 COMMANDS.list_items = function() return tostring(build_items()) end
 
 COMMANDS.give_item = function(a)
   local id, qty, st = tonumber(a[1]), tonumber(a[2]), a[3] == "1"
-  if not id or not qty or qty < 1 then error("bad arguments") end
+  if not id or not qty or id < 1 or qty < 1 or qty > 9999 then
+    error("bad arguments (need item id >= 1, qty 1-9999)")
+  end
   return give_item(math.floor(id), math.floor(qty), st)
 end
 
@@ -4781,9 +4783,13 @@ COMMANDS.jump_probe = function()
 end
 
 ---------------------------------------------------------------- v1.23: faster enemy respawn
--- Adapted from FasterRespawn.lua. Hooks installed at load; the commands below
--- just adjust the hours. Rest at a camp/inn once to trigger the reload.
-local RESPAWN = { boss = 1, normal = 1, is_boss = false,
+-- Adapted from FasterRespawn.lua. Hooks are installed at load but stay
+-- inert (they only record the game's defaults) until respawn_set activates
+-- the override. Rest at a camp/inn once to trigger the reload.
+-- The override is OFF until respawn_set turns it on: merely installing
+-- this script must never change gameplay. While inactive both hooks only
+-- capture the game's own defaults and return them untouched.
+local RESPAWN = { boss = 1, normal = 1, active = false, is_boss = false,
                   boss_def = nil, normal_def = nil, day_def = nil }
 do
   local td = try(function() return sdk.find_type_definition("app.GenerateDefaultParameter") end)
@@ -4806,6 +4812,7 @@ do
             log.info(TAG .. "respawn: captured normal default " .. tostring(orig) .. "h")
           end
         end
+        if not RESPAWN.active then return retval end
         return sdk.to_ptr(RESPAWN.is_boss and RESPAWN.boss or RESPAWN.normal)
       end)
     log.info(TAG .. "respawn hook: getDeadCharaRepopTime")
@@ -4820,9 +4827,10 @@ do
         RESPAWN.day_def = try(function() return sdk.to_int64(retval) end)
         log.info(TAG .. "respawn: captured repop-day default " .. tostring(RESPAWN.day_def))
       end
+      if not RESPAWN.active then return retval end
       return sdk.to_ptr(0)
     end)
-    log.info(TAG .. "respawn hook: get_RepopDay -> 0")
+    log.info(TAG .. "respawn hook: get_RepopDay (override gated on respawn_set)")
   else
     log.info(TAG .. "respawn hook: get_RepopDay NOT FOUND")
   end
@@ -4833,12 +4841,14 @@ COMMANDS.respawn_set = function(a)
   local b = tonumber(a[1]); local n = tonumber(a[2])
   if b then RESPAWN.boss = math.max(0, math.floor(b)) end
   if n then RESPAWN.normal = math.max(0, math.floor(n)) end
-  return string.format("respawn times: boss %dh, normal %dh (rest at a camp/inn once to trigger)",
+  RESPAWN.active = true
+  return string.format("respawn override ON: boss %dh, normal %dh (rest at a camp/inn once to trigger)",
     RESPAWN.boss, RESPAWN.normal)
 end
 
 COMMANDS.respawn_get = function()
-  return string.format("%d,%d", RESPAWN.boss, RESPAWN.normal)
+  return string.format("%d,%d,%d", RESPAWN.boss, RESPAWN.normal,
+    RESPAWN.active and 1 or 0)
 end
 
 local function _defstr(v) return v == nil and "?" or tostring(v) end
@@ -4850,6 +4860,7 @@ COMMANDS.respawn_defaults = function()
 end
 
 COMMANDS.respawn_reset = function()
+  RESPAWN.active = false
   if RESPAWN.boss_def ~= nil then RESPAWN.boss = RESPAWN.boss_def end
   if RESPAWN.normal_def ~= nil then RESPAWN.normal = RESPAWN.normal_def end
   return string.format("%d,%d", RESPAWN.boss, RESPAWN.normal)
@@ -5628,4 +5639,4 @@ re.on_frame(function()
 end)
 
 write_resp("boot", true, "ddbridge ready")
-log.info(TAG .. "v1.89.2 ready (session guard, atomic responses, item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")
+log.info(TAG .. "v1.89.3 ready (session guard, atomic responses, item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")

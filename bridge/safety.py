@@ -39,20 +39,24 @@ READ_ONLY_COMMANDS = {
     "item_special_probe", "item_element_probe", "item_equipdata_probe",
     "item_methods_probe", "item_weaponparam_probe", "abil_dump",
     "abil_dump2", "abil_dump3", "augment_dump", "core_dump",
-    "item_stat_dump", "jump_probe", "timemgr_dump", "timeskip_probe",
+    "item_stat_dump", "jump_probe", "timemgr_dump",
+    # NOTE: timeskip_probe is deliberately NOT here - it installs capture
+    # hooks in the game process, so it is classified as mutating.
     "timeskip_sig", "warp_probe", "wskill_probe", "wskill_detail",
     "wskill_enabled_dump", "eqability_probe", "eqability_probe2",
     "stat_search",
 }
 
 # Sidecar dump/probe files the cleanup command may delete from the data dir.
+# NOT a dump: itemnames.txt - ddbridge.lua persists the user's custom item
+# names there (read back at every load). Deleting it would wipe renames.
 SIDECAR_DUMPS = [
     "items.txt", "enums.txt", "specialsweep.txt", "abildump.txt",
     "abildump2.txt", "abildump3.txt", "augdump.txt", "coredump.txt",
     "itemstatdump.txt", "wskill_info.txt", "wskill_detail.txt",
     "wskill_enabled.txt", "eqability.txt", "eqability2.txt",
     "badges.txt", "badgenames.txt", "timemgr.txt", "jumpdump.txt",
-    "dupprobe.txt", "nameprobe.txt", "itemnames.txt",
+    "dupprobe.txt", "nameprobe.txt",
 ]
 
 MAX_BACKUPS = 10
@@ -146,25 +150,42 @@ def backups_dir():
     return path
 
 
-def backup_saves():
-    """Copy the active save folder into backups/<timestamp>/.
+def _remote_account(remote):
+    """Steam account folder name for a ``.../userdata/<id>/2054970/remote``."""
+    return os.path.basename(os.path.dirname(os.path.dirname(remote)))
 
+
+def _unique(path):
+    n, base = 1, path
+    while os.path.exists(path):
+        n += 1
+        path = f"{base}-{n}"
+    return path
+
+
+def backup_saves(remote=None):
+    """Copy a save folder into backups/<timestamp>-<account>/.
+
+    ``remote`` defaults to the most recently modified save folder.
     Returns the backup folder path, or None when no save folder was found.
-    Keeps the newest ``MAX_BACKUPS`` backups.
+    The very first backup ever made is also stored as a ``pinned-`` copy
+    that pruning never removes, so the pre-tool baseline cannot age out.
+    Keeps the newest ``MAX_BACKUPS`` regular backups.
     """
-    remotes = find_save_remote_dirs()
-    if not remotes:
-        return None
-    src = remotes[0]
+    if remote is None:
+        remotes = find_save_remote_dirs()
+        if not remotes:
+            return None
+        remote = remotes[0]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    account = os.path.basename(os.path.dirname(os.path.dirname(src)))
-    dest = os.path.join(backups_dir(), f"{stamp}-{account}")
-    suffix = 1
-    base = dest
-    while os.path.exists(dest):
-        suffix += 1
-        dest = f"{base}-{suffix}"
-    shutil.copytree(src, dest)
+    account = _remote_account(remote)
+    dest = _unique(os.path.join(backups_dir(), f"{stamp}-{account}"))
+    shutil.copytree(remote, dest)
+    if not any(os.path.basename(p).startswith("pinned-")
+               for p in list_backups()):
+        pinned = _unique(os.path.join(
+            backups_dir(), f"pinned-{stamp}-{account}"))
+        shutil.copytree(remote, pinned)
     prune_backups()
     return dest
 
@@ -180,21 +201,48 @@ def list_backups():
 
 
 def prune_backups(keep=MAX_BACKUPS):
-    for old in list_backups()[keep:]:
+    regular = [p for p in list_backups()
+               if not os.path.basename(p).startswith("pinned-")]
+    for old in regular[keep:]:
         shutil.rmtree(old, ignore_errors=True)
 
 
-def restore_backup(backup_path):
-    """Copy a backup back over the live save folder.
+_BACKUP_NAME_RE = re.compile(
+    r"^(?:pinned-)?\d{8}-\d{6}-(.+?)(?:-\d+)?$")
 
-    The current live save is backed up first (as a ``pre-restore`` copy),
-    so a restore is itself undoable. Returns the live folder restored to.
+
+def backup_account(backup_path):
+    """Account a backup folder was taken from (None if unparseable)."""
+    m = _BACKUP_NAME_RE.match(os.path.basename(backup_path))
+    return m.group(1) if m else None
+
+
+def restore_backup(backup_path):
+    """Copy a backup back over the live save folder of the SAME account.
+
+    Restoring account A's backup into account B's folder would corrupt
+    B's cloud/local state, so when several accounts exist the target must
+    match the account recorded in the backup's folder name. The target's
+    current save is backed up first, so a restore is itself undoable.
+    Returns ``(live_folder, safety_backup)``.
     """
     remotes = find_save_remote_dirs()
     if not remotes:
         raise FileNotFoundError("No DD2 save folder found to restore into.")
-    live = remotes[0]
-    safety = backup_saves()
+    account = backup_account(backup_path)
+    live = None
+    if account:
+        live = next((r for r in remotes if _remote_account(r) == account),
+                    None)
+    if live is None:
+        if len(remotes) == 1:
+            live = remotes[0]
+        else:
+            raise FileNotFoundError(
+                f"This backup belongs to Steam account {account}, but no "
+                "save folder for that account was found. Refusing to "
+                "restore it into a different account.")
+    safety = backup_saves(remote=live)
     tmp = live + ".restore-tmp"
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(backup_path, tmp)

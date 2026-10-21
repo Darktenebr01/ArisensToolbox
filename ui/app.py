@@ -13,6 +13,7 @@ import customtkinter as ctk
 
 from bridge import safety
 from bridge.game_path import config_dir
+from bridge.protocol import BridgeError
 from ui.tabs.connection import ConnectionTab
 from ui.tabs.item_giver import ItemGiverTab
 from ui.tabs.item_editor import ItemEditorTab
@@ -57,6 +58,31 @@ def setup_logging():
     return path
 
 
+def _acquire_instance_lock():
+    """Take the per-user single-instance lock; return the open file or None.
+
+    OS-level locking (msvcrt/flock), so a crashed instance never leaves a
+    stale lock behind - the OS releases it with the process.
+    """
+    try:
+        os.makedirs(config_dir(), exist_ok=True)
+        handle = open(os.path.join(config_dir(), "instance.lock"), "a+")
+    except OSError:
+        return True  # cannot even create it: don't block startup on this
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 # Tabs hidden from the sidebar in normal use (still importable/shown by code).
 # (The Signatures tab was removed in v0.92 - see safety notes in README.)
 DEV_TABS = {"Level & Stats", "Stat Search"}
@@ -96,6 +122,17 @@ class BridgeApp(ctk.CTk):
         except Exception:
             pass
 
+        # Single instance: two windows would fight over the one
+        # cmd.txt/resp.txt pair and interleave commands/responses.
+        self._instance_lock = _acquire_instance_lock()
+        if self._instance_lock is None:
+            messagebox.showerror(
+                "Arisen's Toolbox",
+                "Arisen's Toolbox is already running. Two windows would "
+                "fight over the same bridge files, so this one will close.")
+            self.destroy()
+            raise SystemExit(1)
+
         # shared state
         self.selected_item_row = None   # Item Editor <-> Item Stats
         self.enum_data = {}             # enums loaded at connect
@@ -126,7 +163,7 @@ class BridgeApp(ctk.CTk):
         self.bind_all("<Control-F>", lambda e: self._shortcut_search())
         self.bind_all("<F5>", lambda e: self._shortcut_refresh())
         self.bind_all("<Escape>", lambda e: self._shortcut_escape())
-        self.bind_all("<Control-z>", lambda e: self.undo_last())
+        self.bind_all("<Control-z>", self._shortcut_undo)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- UI thread dispatcher ------------------------------------------
@@ -507,28 +544,66 @@ class BridgeApp(ctk.CTk):
             # Save protection: back the save up before this session's
             # first mutating command reaches the game.
             client.on_before_first_mutation = self._ensure_save_backup
+            client.on_session_changed = self._on_session_changed
             self._hb_failures = 0
             self._set_conn_dot(True)
 
     # -- save protection / undo / bulk confirm (v0.92) ---------------------
 
     def _ensure_save_backup(self, command):
-        """Protocol hook (worker thread): back up saves pre-mutation."""
+        """Protocol hook (worker thread): back up saves pre-mutation.
+
+        Three outcomes, kept distinct (v0.93):
+        - backup made -> status says where;
+        - no save folder found -> warn, but proceed (the layout may be
+          one discovery cannot see; blocking forever helps nobody);
+        - a save folder WAS found but copying it failed -> raise
+          BridgeError so the command is NOT sent. Failing open here made
+          the whole safety net decorative.
+        """
+        log = logging.getLogger("arisens.safety")
+        try:
+            remotes = safety.find_save_remote_dirs()
+        except Exception:
+            log.exception("save discovery failed; proceeding with warning")
+            remotes = None
+        if remotes is not None and not remotes:
+            log.warning("no DD2 save folder found; %s proceeds unbacked",
+                        command)
+            self.call_soon(
+                self.set_status,
+                "Warning: no DD2 save folder found, so this change has "
+                "NO automatic backup.")
+            return
         try:
             dest = safety.backup_saves()
-        except Exception:
-            logging.getLogger("arisens.safety").exception("save backup failed")
-            dest = None
+        except Exception as e:
+            log.exception("save backup copy failed")
+            raise BridgeError(
+                f"Save backup FAILED ({e}) - '{command}' was NOT sent. "
+                "Fix the backup problem (disk space / permissions), or "
+                "back up manually from the Connection tab.")
         if dest:
             self.call_soon(self.set_status,
                            f"Save backed up before '{command}': {dest}")
-        else:
-            logging.getLogger("arisens.safety").warning(
-                "no DD2 save folder found; %s proceeds without a backup",
-                command)
-            self.call_soon(self.set_status,
-                           "Warning: no DD2 save folder found, so no "
-                           "automatic backup was made.")
+
+    def _on_session_changed(self):
+        """Protocol callback: the game restarted (new boot token).
+
+        Undo entries hold values captured from the OLD session's save;
+        writing them into whatever is loaded now would corrupt it, so the
+        stack is dropped. The protocol already re-armed the backup hook.
+        """
+        def _clear():
+            self._undo_stack.clear()
+            try:
+                self.undo_btn.configure(state="disabled")
+            except Exception:
+                pass
+            self.set_status(
+                "Game restarted - undo history cleared; the next change "
+                "will take a fresh save backup first.")
+        self.call_soon(_clear)
 
     def record_undo(self, label, undo_fn):
         """Push an undo entry. undo_fn(client) re-applies previous values
@@ -621,11 +696,15 @@ class BridgeApp(ctk.CTk):
             client = self.client
             if client is not None:
                 def _beat():
-                    try:
-                        client.ping(timeout=3)
+                    # try_ping never queues behind a running command: a
+                    # skipped beat (False) is not a connection failure.
+                    pong = client.try_ping(timeout=2)
+                    if pong is False:
+                        return
+                    if pong:
                         self._hb_failures = 0
                         self.call_soon(lambda: self._set_conn_dot(True))
-                    except Exception:
+                    else:
                         self._hb_failures += 1
                         if self._hb_failures >= 2:
                             self.call_soon(lambda: (
@@ -685,9 +764,29 @@ class BridgeApp(ctk.CTk):
 
     def _on_close(self):
         self._save_ui_state()
+        lock = getattr(self, "_instance_lock", None)
+        if lock is not None and lock is not True:
+            try:
+                lock.close()
+            except Exception:
+                pass
         self.destroy()
 
     # -- keyboard shortcuts ----------------------------------------------------
+
+    def _shortcut_undo(self, _event=None):
+        # Ctrl+Z is also text-undo: while the user is typing in an entry
+        # or textbox it must NOT revert a game change behind their back.
+        try:
+            focused = self.focus_get()
+        except Exception:
+            focused = None
+        if focused is not None and focused.winfo_class() in (
+                "Entry", "Text", "TEntry", "TText", "Spinbox", "TSpinbox",
+                "TCombobox"):
+            return
+        self.undo_last()
+        return "break"
 
     def _shortcut_search(self):
         self.show_tab("Item Giver")

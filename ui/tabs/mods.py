@@ -294,7 +294,8 @@ class ModsTab(BaseTab):
         cc = card_content(card)
 
         Muted(cc, "Overrides how many in-game hours until enemies respawn. "
-                  "Rest at a camp/inn once to trigger the reload.",
+                  "The override is OFF until you press Apply; Reset turns it "
+                  "back off. Rest at a camp/inn once to trigger the reload.",
               row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         ctk.CTkLabel(cc, text="Boss respawn (hours):", font=(T.FONT_FAMILY, 12),
@@ -480,11 +481,15 @@ class ModsTab(BaseTab):
         try:
             res = client.send("respawn_get", timeout=10)
             parts = (res or "").split(",")
-            if len(parts) == 2:
+            if len(parts) in (2, 3):
+                on = len(parts) == 3 and parts[2].strip() == "1"
                 def _ui():
                     self.boss_var.set(parts[0].strip())
                     self.normal_var.set(parts[1].strip())
-                    self.respawn_var.set(f"Current: boss {parts[0].strip()}h, normal {parts[1].strip()}h")
+                    state = "override ON" if on else "override OFF (game defaults in effect)"
+                    self.respawn_var.set(
+                        f"Current: boss {parts[0].strip()}h, normal "
+                        f"{parts[1].strip()}h - {state}")
                     self.app.set_status("Respawn times read.")
                 self.after(0, _ui)
             else:

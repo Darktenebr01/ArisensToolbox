@@ -4,7 +4,7 @@ title Arisen's Toolbox - exe builder
 
 echo ============================================
 echo  Arisen's Toolbox - building ArisensToolbox.exe
-echo  build script v0.11
+echo  build script v0.12
 echo ============================================
 echo.
 
@@ -17,7 +17,7 @@ if errorlevel 1 (
 )
 
 echo [1/2] Installing PyInstaller...
-python -m pip install --upgrade pyinstaller customtkinter
+python -m pip install "pyinstaller>=6,<7" "customtkinter==6.0.0"
 if errorlevel 1 (
     echo.
     echo ERROR: pip install failed - see the error above.

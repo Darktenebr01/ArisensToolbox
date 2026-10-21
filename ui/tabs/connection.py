@@ -4,14 +4,16 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
 import time
-import urllib.request
-import zipfile
 
 import customtkinter as ctk
 
 from bridge import safety
+from bridge.installer import (
+    REFRAMEWORK_URL, REFW_MIN_BYTES, _backup_dll, _download,
+    _extract_dinput8, download_reframework, file_sha256,
+    looks_like_reframework,
+)
 from bridge.enums import parse_enums
 from bridge.game_path import (
     config_dir, find_data_dir, data_dir_or_raise, game_dir_from_data_dir,
@@ -23,125 +25,6 @@ from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import Card, card_content, H1, Muted, PrimaryButton, GhostButton, run_async, Tooltip
 from version import BRIDGE_MAJOR, BRIDGE_VERSION, CLIENT_VERSION
-
-REFRAMEWORK_URL = ("https://github.com/praydog/REFramework-nightly/releases/"
-                   "latest/download/REFramework.zip")
-# Nightly is deliberately tracked so title updates keep working; there is no
-# stable checksum to pin. We trust GitHub's TLS, validate the zip, assert a
-# plausible DLL size, and keep a backup before replacing anything.
-DD2_STEAM_APPID = "2054970"
-# dinput8.dll is several MB; a tiny file means an HTML error page or a
-# truncated zip, so refuse to install it over a working copy.
-REFW_MIN_BYTES = 200_000
-
-
-def installed_lua_version(path):
-    """Read the version from an installed ddbridge.lua header, or None."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            head = f.read(4096)
-    except OSError:
-        return None
-    m = re.search(r"ddbridge\.lua\s+v(\d+\.\d+\.\d+)", head)
-    if m:
-        return m.group(1)
-    m = re.search(r"pong ddbridge (\d+\.\d+\.\d+)", head)
-    return m.group(1) if m else None
-
-
-def game_running():
-    if os.name != "nt":
-        return False
-    name = game_exe_name()
-    try:
-        # Windowed PyInstaller builds must not flash a console for tasklist.
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}"],
-                             capture_output=True, text=True, timeout=10,
-                             creationflags=flags).stdout
-        return name.lower() in out.lower()
-    except Exception:
-        return False
-
-
-def _download(url, dest, progress_cb):
-    """Download url to dest with a timeout and progress reporting."""
-    req = urllib.request.Request(
-        url, headers={"User-Agent": f"ArisensToolbox/{CLIENT_VERSION}"})
-    with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as out:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            done += len(chunk)
-            if total:
-                pct = min(100, done * 100 // total)
-                progress_cb(f"Downloading REFramework... {pct}%")
-
-
-def _extract_dinput8(zip_path):
-    """Return the dinput8.dll bytes from REFramework.zip, or raise."""
-    with zipfile.ZipFile(zip_path, "r") as z:
-        bad = z.testzip()
-        if bad:
-            raise RuntimeError(f"REFramework.zip is corrupt ({bad})")
-        name = next((n for n in z.namelist()
-                     if n.lower().endswith("dinput8.dll")), None)
-        if not name:
-            raise RuntimeError("dinput8.dll not found in REFramework.zip")
-        data = z.read(name)
-    if len(data) < REFW_MIN_BYTES:
-        raise RuntimeError(
-            f"dinput8.dll looks invalid ({len(data)} bytes) - download aborted")
-    return data
-
-
-def _backup_dll(dest):
-    """Back up dest to a single ``.bak`` file, replaced on the next update."""
-    backup = dest + ".bak"
-    shutil.copy2(dest, backup)
-    # Drop any timestamped backups left by older builds: one .bak policy.
-    for old in glob.glob(dest + ".bak-*"):
-        try:
-            os.remove(old)
-        except OSError:
-            pass
-    return backup
-
-
-def download_reframework(game_dir, progress_cb):
-    """Download REFramework.zip and extract ONLY dinput8.dll (per the release notes).
-
-    The existing DLL is backed up first and the new one is swapped in with
-    os.replace, so a failed download can never leave a broken install.
-    """
-    progress_cb("Downloading REFramework...")
-    tmp_zip = None
-    tmp_dll = os.path.join(game_dir, "dinput8.dll.new")
-    try:
-        fd, tmp_zip = tempfile.mkstemp(suffix=".zip")
-        os.close(fd)
-        _download(REFRAMEWORK_URL, tmp_zip, progress_cb)
-        progress_cb("Installing REFramework...")
-        data = _extract_dinput8(tmp_zip)
-        with open(tmp_dll, "wb") as f:
-            f.write(data)
-        dest = os.path.join(game_dir, "dinput8.dll")
-        if os.path.isfile(dest):
-            backup = _backup_dll(dest)
-            progress_cb(f"Backed up the old dinput8.dll to {os.path.basename(backup)}")
-        os.replace(tmp_dll, dest)
-    finally:
-        for path in (tmp_zip, tmp_dll):
-            if path:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-
 
 class ConnectionTab(BaseTab):
     def __init__(self, parent, app):
@@ -341,12 +224,22 @@ class ConnectionTab(BaseTab):
                 getattr(self, "data_dir", None) or data_dir_or_raise())
         except Exception:
             pass
+        versions = {"client": CLIENT_VERSION,
+                    "bridge_bundled": BRIDGE_VERSION}
+        if game_dir:
+            dll = os.path.join(game_dir, "dinput8.dll")
+            if os.path.isfile(dll):
+                try:
+                    versions["dinput8.dll_sha256"] = file_sha256(dll)
+                    versions["dinput8.dll_looks_like_reframework"] = \
+                        str(looks_like_reframework(dll))
+                except OSError:
+                    pass
         def _do():
             try:
                 safety.make_diagnostics_zip(
                     out,
-                    versions={"client": CLIENT_VERSION,
-                              "bridge_bundled": BRIDGE_VERSION},
+                    versions=versions,
                     client=client, game_dir=game_dir,
                     log_path=getattr(self.app, "log_path", None))
                 msg = f"Diagnostics bundle written: {out}"
