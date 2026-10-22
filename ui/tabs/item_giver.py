@@ -10,7 +10,27 @@ from ui.widgets import (
     run_async,
 )
 
-MAX_SHOWN = 300
+
+def parse_items(text):
+    """Parse items.txt content -> (items, data_lines).
+
+    items is [(id, name, lname)]; data_lines counts the non-empty
+    lines in the file, so the UI can report the whole chain
+    (game count / file lines / parsed / shown) and any silent loss
+    becomes visible instead of looking like a short list.
+    """
+    items = []
+    lines = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        lines += 1
+        if "\t" not in line:
+            continue
+        sid, name = line.split("\t", 1)
+        if sid.strip().isdigit():
+            items.append((int(sid), name.strip(), name.strip().lower()))
+    return items, lines
 
 
 class ItemGiverTab(BaseTab):
@@ -45,7 +65,11 @@ class ItemGiverTab(BaseTab):
         lframe.grid(row=1, column=0, sticky="nsew")
         lframe.grid_columnconfigure(0, weight=1)
         lframe.grid_rowconfigure(0, weight=1)
-        self.listbox = StyledListbox(lframe)
+        # The list is filled through a listvariable: one bulk
+        # assignment replaces every row at once (the old code inserted
+        # row by row AND silently stopped at 300 matches).
+        self._list_var = tk.StringVar()
+        self.listbox = StyledListbox(lframe, listvariable=self._list_var)
         self.listbox.grid(row=0, column=0, sticky="nsew")
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
         sb = tk.Scrollbar(lframe, orient="vertical", command=self.listbox.yview)
@@ -113,16 +137,13 @@ class ItemGiverTab(BaseTab):
         self._run(lambda: self._load_items(client))
 
     def _fill_items(self, text, source):
-        items = []
-        for line in text.splitlines():
-            if "\t" not in line:
-                continue
-            sid, name = line.split("\t", 1)
-            if sid.strip().isdigit():
-                items.append((int(sid), name.strip(), name.strip().lower()))
+        items, lines = parse_items(text)
         self.items = items
         self.refresh_list()
-        self.app.set_status(f"Loaded {len(items)} items from {source}.")
+        self.app.set_status(
+            f"Loaded {len(items)} items from {source} "
+            f"(items.txt: {lines} lines, {len(items)} parsed, "
+            f"{len(self.shown)} shown).")
 
     def _load_items(self, client):
         try:
@@ -131,38 +152,35 @@ class ItemGiverTab(BaseTab):
             if not text:
                 raise BridgeError("items.txt missing")
             self.app.cache_sidecar("items.txt", text)
-            items = []
-            for line in text.splitlines():
-                if "\t" not in line:
-                    continue
-                sid, name = line.split("\t", 1)
-                if sid.strip().isdigit():
-                    items.append((int(sid), name.strip(), name.strip().lower()))
+            items, lines = parse_items(text)
             self.items = items
-            self.after(0, lambda: (
-                self.refresh_list(),
-                self.app.set_status(f"Loaded {len(items)} items (game said {count})."),
-            ))
+
+            def finish(items=items, lines=lines, count=count):
+                self.refresh_list()
+                self.app.set_status(
+                    f"Loaded {len(items)} items (game said {count}; "
+                    f"items.txt: {lines} lines, {len(items)} parsed, "
+                    f"{len(self.shown)} shown).")
+            self.after(0, finish)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Item list failed: {e}"
             self.after(0, lambda: self.app.set_status(err))
 
     def refresh_list(self):
         tokens = self.search_var.get().lower().split()
-        self.listbox.delete(0, tk.END)
-        self.shown = []
-        n = 0
+        shown = []
+        rows = []
         for iid, name, lname in self.items:
             sid = str(iid)
             if all(t in lname or t in sid for t in tokens):
-                n += 1
-                if n <= MAX_SHOWN:
-                    self.listbox.insert(tk.END, f"{iid}   {name}")
-                    self.shown.append((iid, name))
-        if n > MAX_SHOWN:
-            self.app.set_status(f"{n} match(es) - showing first {MAX_SHOWN}, refine the search.")
-        elif self.items:
-            self.app.set_status(f"{n} match(es).")
+                shown.append((iid, name))
+                rows.append(f"{iid}   {name}")
+        self.shown = shown
+        # One bulk assignment - no cap, no per-row inserts.
+        # (A tuple: tkinter turns it into a proper Tcl list.)
+        self._list_var.set(tuple(rows))
+        if self.items:
+            self.app.set_status(f"{len(shown)} match(es).")
 
     def on_select(self, _event):
         sel = self.listbox.curselection()
