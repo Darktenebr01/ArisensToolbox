@@ -1,0 +1,33 @@
+Arisen's Toolbox — License
+
+Copyright (c) 2026 Darktenebr01. All rights reserved.
+
+PERSONAL USE — WHAT YOU CAN DO
+
+You may download and use Arisen's Toolbox (the desktop app), its
+cheat table, and the ddbridge.lua bridge script for your own personal,
+non-commercial use. You may keep a private copy and modify it for
+yourself.
+
+WHAT YOU CANNOT DO WITHOUT WRITTEN PERMISSION
+
+- Redistribute, re-upload, mirror, or share the files (or copies of
+  them) anywhere else — share the official links instead:
+  https://github.com/Darktenebr01/ArisensToolbox and
+  https://www.nexusmods.com/dragonsdogma2/mods/1784
+- Use the scripts, the bridge, or any substantial part of the code in
+  another table, app, or project, publicly or commercially.
+- Sell, rent, or bundle the tools (or derivatives of them) for a fee.
+- Remove or alter the author credit contained in the files.
+
+To ask for permission, contact Darktenebr01 through the Nexus Mods
+page above or via GitHub.
+
+This license covers only the work in this repository. REFramework is
+a separate project by praydog (github.com/praydog/REFramework) with
+its own terms; the tools download it from its official source and do
+not redistribute it.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. GAME
+MODDING TOOLS CAN AFFECT SAVE DATA; THE AUTHOR IS NOT LIABLE FOR ANY
+LOSS OR DAMAGE ARISING FROM THEIR USE.
