@@ -1,15 +1,15 @@
-"""Item Stats tab: enhancement, base stats, and special effects of the selected item."""
+"""Item Stats: enhancement, base stats and special effects of one item."""
 import math
-import re
-import tkinter as tk
+
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
-    Field, Combo, StyledListbox, run_async, require_client, show_probe,
+    Section, PageHeader, Row, ScrollArea, ListPanel, Frame, Field, Combo,
+    PrimaryButton, GhostButton, QuietButton, caption, dev_only, run_async,
+    require_client, show_probe,
 )
 
 SPECIAL_NAMES = {
@@ -29,130 +29,153 @@ class ItemStatsTab(BaseTab):
         super().__init__(parent, fg_color="transparent")
         self.app = app
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self.scroll.grid(row=0, column=0, sticky="nsew")
-        self.scroll.grid_columnconfigure(0, weight=1)
+        PageHeader(
+            self, "Item Stats",
+            "Inspect and change the enhancement, base stats and hidden "
+            "special effect of the selected item.").grid(
+                row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
 
-        r = 0
-        H1(self.scroll, "Item Stats", row=r, column=0, sticky="w", pady=(0, 10))
-        r += 1
+        self.scroll = ScrollArea(self)
+        self.scroll.grid(row=1, column=0, sticky="nsew")
 
-        # selection card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        self.sel_var = ctk.StringVar(value="Selected item: (pick one in the Item Editor tab)")
-        ctk.CTkLabel(cc, textvariable=self.sel_var,
-                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
-            row=0, column=0, sticky="w", pady=(0, 4))
-
+        selection = Section(self.scroll, "Selection",
+                            **{"row": 0, "column": 0, "sticky": "ew",
+                               "pady": (0, T.PAD_M)})
+        body = selection.body
+        self.sel_var = ctk.StringVar(
+            value="No item selected - pick one in Item Editor.")
+        ctk.CTkLabel(body, textvariable=self.sel_var,
+                     font=T.font(T.SIZE_BODY, "bold"), text_color=T.TEXT,
+                     anchor="w").grid(row=0, column=0, columnspan=2,
+                                      sticky="ew")
         self.totals_var = ctk.StringVar(value="")
-        ctk.CTkLabel(cc, textvariable=self.totals_var,
-                     font=("Consolas", 11), text_color=T.TEXT).grid(
-            row=1, column=0, sticky="w", pady=(0, 6))
+        ctk.CTkLabel(body, textvariable=self.totals_var,
+                     font=T.mono(T.SIZE_SMALL), text_color=T.TEXT_SOFT,
+                     anchor="w", justify="left").grid(
+            row=1, column=0, columnspan=2, sticky="ew",
+            pady=(T.PAD_XS, T.PAD_S))
+        row = Row(body)
+        row.grid(row=2, column=0, columnspan=2, sticky="w")
+        row.add(GhostButton(row, "Character totals", width=140,
+                            command=self.read_totals))
+        row.add(QuietButton(row, "Sweep all specials", width=136,
+                            command=self.sweep_specials))
+        dev_only(self, lambda: QuietButton(row, "Dump fields", width=110,
+                                          command=self.dump_fields).pack(
+            side="left"))
 
-        trow = ctk.CTkFrame(cc, fg_color="transparent")
-        trow.grid(row=2, column=0, sticky="w")
-        GhostButton(trow, text="Read character totals", width=170,
-                    command=self.read_totals).pack(side="left", padx=(0, 8))
-        dev_only(self, lambda: GhostButton(trow, text="DUMP all item fields", width=170,
-                    command=self.dump_fields).pack(side="left"))
-        GhostButton(trow, text="Sweep all specials", width=150,
-                    command=self.sweep_specials).pack(side="left", padx=8)
+        # -- enhancement + special, side by side ----------------------
+        duo = Frame(self.scroll)
+        duo.grid(row=1, column=0, sticky="ew", pady=(0, T.PAD_M))
+        duo.grid_columnconfigure(0, weight=1)
+        duo.grid_columnconfigure(1, weight=1)
 
-        # enhancement card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Enhancement (this item only)", row=0, column=0, sticky="w", pady=(0, 6))
-        erow = ctk.CTkFrame(cc, fg_color="transparent")
-        erow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(erow, **T.body("Level:")).pack(side="left")
+        enh = Section(duo, "Enhancement", hint="This item only.",
+                      **{"row": 0, "column": 0, "sticky": "nsew",
+                         "padx": (0, T.PAD_M)})
+        body = enh.body
+        top = Row(body)
+        top.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(top, text="Level", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.enh_level_var = ctk.StringVar(value="0")
-        Field(erow, textvariable=self.enh_level_var, width=60).pack(side="left", padx=8)
+        Field(top, textvariable=self.enh_level_var, width=64).pack(side="left")
         self.enh_cap_var = ctk.StringVar(value="(max ?)")
-        ctk.CTkLabel(erow, textvariable=self.enh_cap_var,
-                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).pack(side="left", padx=8)
-        GhostButton(erow, text="Read", width=90,
-                    command=self.read_enh).pack(side="left", padx=8)
+        ctk.CTkLabel(top, textvariable=self.enh_cap_var,
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED).pack(
+            side="left", padx=(T.PAD_S, 0))
+        QuietButton(top, "Read", width=70,
+                    command=self.read_enh).pack(side="right")
 
         self.enh_combos = []
         for t in range(3):
-            trow = ctk.CTkFrame(cc, fg_color="transparent")
-            trow.grid(row=2 + t, column=0, sticky="ew", pady=2)
-            trow.grid_columnconfigure(1, weight=1)
-            ctk.CTkLabel(trow, **T.body(f"Type {t}:")).grid(row=0, column=0, padx=(0, 8))
-            cb = Combo(trow, values=["(read first)"])
+            line = Frame(body)
+            line.grid(row=1 + t, column=0, sticky="ew", pady=(T.PAD_S, 0))
+            line.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(line, text=f"Type {t}", font=T.font(T.SIZE_SMALL),
+                         text_color=T.MUTED, width=52, anchor="w").grid(
+                row=0, column=0, sticky="w")
+            cb = Combo(line, values=["(read first)"])
             cb.grid(row=0, column=1, sticky="ew")
             cb.set("(read first)")
             self.enh_combos.append(cb)
+        PrimaryButton(body, "Apply enhancement", width=160,
+                      command=self.apply_enh).grid(row=4, column=0,
+                                                   sticky="w",
+                                                   pady=(T.PAD_M, 0))
 
-        PrimaryButton(cc, text="Apply enhancement", width=170,
-                      command=self.apply_enh).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        special = Section(duo, "Special effect",
+                          hint="Rings and similar items: effect ID + values.",
+                          **{"row": 0, "column": 1, "sticky": "nsew"})
+        body = special.body
+        grid = Frame(body)
+        grid.grid(row=0, column=0, sticky="ew")
+        self.spec_vars = []
+        for i, label in enumerate(["ID", "Value 1", "Value 2", "Value 3"]):
+            ctk.CTkLabel(grid, text=label, font=T.font(T.SIZE_SMALL),
+                         text_color=T.MUTED).grid(
+                row=0, column=i, sticky="w",
+                padx=(0 if i == 0 else T.PAD_S, 0))
+            var = ctk.StringVar(value="0")
+            Field(grid, textvariable=var, width=70).grid(
+                row=1, column=i, padx=(0 if i == 0 else T.PAD_S, 0),
+                pady=(2, 0))
+            self.spec_vars.append(var)
+        self.spec_name_var = ctk.StringVar(value="Effect: -")
+        ctk.CTkLabel(body, textvariable=self.spec_name_var,
+                     font=T.font(T.SIZE_SMALL), text_color=T.TEXT_SOFT,
+                     anchor="w", justify="left").grid(
+            row=1, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        row = Row(body)
+        row.grid(row=2, column=0, sticky="w", pady=(T.PAD_S, 0))
+        row.add(QuietButton(row, "Read", width=70, command=self.read_special))
+        row.add(PrimaryButton(row, "Apply", width=90,
+                              command=self.apply_special))
+        dev_only(self, lambda: QuietButton(row, "Effect names", width=110,
+                                          command=self.probe_special).pack(
+            side="left"))
+        caption(body, "Shared by every copy of this item; unequip and "
+                      "re-equip to apply. Resets when the game restarts.",
+                row=3, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
-        # base stats card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Base stats", row=0, column=0, sticky="w", pady=(0, 6))
-        Muted(cc, "Shared by every copy of this item type; reset when the game restarts.",
-              row=1, column=0, sticky="w", pady=(0, 6))
-        brow = ctk.CTkFrame(cc, fg_color="transparent")
-        brow.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
-        brow.grid_columnconfigure(0, weight=1)
-        self.stat_listbox = StyledListbox(brow, height=10)
-        self.stat_listbox.grid(row=0, column=0, sticky="nsew")
-        bsb = tk.Scrollbar(brow, orient="vertical", command=self.stat_listbox.yview)
-        bsb.grid(row=0, column=1, sticky="ns")
-        self.stat_listbox.config(yscrollcommand=bsb.set)
+        # -- base stats ----------------------------------------------
+        stats = Section(self.scroll, "Base stats",
+                        hint="Shared by every copy of this item type and "
+                             "reset when the game restarts.",
+                        **{"row": 2, "column": 0, "sticky": "ew"})
+        body = stats.body
+        body.grid_rowconfigure(0, weight=1)
+        split = Frame(body)
+        split.grid(row=0, column=0, sticky="nsew")
+        split.grid_columnconfigure(0, weight=1)
+        split.grid_rowconfigure(0, weight=1)
+        self.panel = ListPanel(split, height=8,
+                               empty="Read the stats of the selected item.")
+        self.panel.grid(row=0, column=0, sticky="nsew", padx=(0, T.PAD_M))
+        self.stat_listbox = self.panel.listbox
         self.stat_rows = []  # field names parallel to listbox
 
-        bctl = ctk.CTkFrame(cc, fg_color="transparent")
-        bctl.grid(row=3, column=0, sticky="ew")
-        GhostButton(bctl, text="Read stats", width=120,
-                    command=lambda: self.read_stats(quiet=False)).pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(bctl, **T.body("New value:")).pack(side="left")
+        controls = Frame(split)
+        controls.grid(row=0, column=1, sticky="ns")
+        controls.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(controls, text="New value", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED, anchor="w").grid(
+            row=0, column=0, sticky="w")
         self.stat_val_var = ctk.StringVar(value="0")
-        Field(bctl, textvariable=self.stat_val_var, width=90).pack(side="left", padx=8)
-        PrimaryButton(bctl, text="Set selected", width=120,
-                      command=self.set_stat).pack(side="left", padx=8)
-        GhostButton(bctl, text="Recalculate now", width=140,
-                    command=self.recalc).pack(side="left")
+        Field(controls, textvariable=self.stat_val_var, width=120).grid(
+            row=1, column=0, sticky="ew", pady=(2, T.PAD_S))
+        PrimaryButton(controls, "Set selected", width=120,
+                      command=self.set_stat).grid(row=2, column=0,
+                                                  sticky="ew")
+        QuietButton(controls, "Read stats", width=120,
+                    command=lambda: self.read_stats(quiet=False)).grid(
+            row=3, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        QuietButton(controls, "Recalculate", width=120,
+                    command=self.recalc).grid(row=4, column=0, sticky="ew",
+                                              pady=(T.PAD_XS, 0))
 
-        # special effect card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Special effect (rings etc.: effect ID + values)",
-           row=0, column=0, sticky="w", pady=(0, 6))
-        srow = ctk.CTkFrame(cc, fg_color="transparent")
-        srow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        self.spec_vars = []
-        for i, n in enumerate(["Special ID:", "Value 1:", "Value 2:", "Value 3:"]):
-            ctk.CTkLabel(srow, **T.body(n)).pack(side="left", padx=(0 if i == 0 else 12, 4))
-            v = ctk.StringVar(value="0")
-            Field(srow, textvariable=v, width=80).pack(side="left")
-            self.spec_vars.append(v)
-        self.spec_name_var = ctk.StringVar(value="Effect: -")
-        ctk.CTkLabel(cc, textvariable=self.spec_name_var,
-                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
-            row=2, column=0, sticky="w", pady=(0, 4))
-        Muted(cc, "Shared item data (all copies of this item); resets on restart. "
-                  "Unequip/re-equip to apply.",
-              row=3, column=0, sticky="w", pady=(0, 6))
-
-        sctl = ctk.CTkFrame(cc, fg_color="transparent")
-        sctl.grid(row=4, column=0, sticky="w")
-        GhostButton(sctl, text="Read", width=120,
-                    command=self.read_special).pack(side="left", padx=(0, 8))
-        PrimaryButton(sctl, text="Apply", width=120,
-                      command=self.apply_special).pack(side="left", padx=8)
-        dev_only(self, lambda: GhostButton(sctl, text="Probe effect names", width=160,
-                    command=self.probe_special).pack(side="left", padx=8))
-
-        # refresh the label whenever this tab becomes visible
         self.bind("<Map>", self._on_map)
         self.refresh()
 
@@ -166,14 +189,14 @@ class ItemStatsTab(BaseTab):
         row = self.app.selected_item_row
         name = getattr(self.app, "selected_item_name", None)
         if row:
-            self.sel_var.set(f"Selected item: {name or '?'} (row {row})")
+            self.sel_var.set(f"{name or 'Item'}   ·   row {row}")
         else:
-            self.sel_var.set("Selected item: (pick one in the Item Editor tab)")
+            self.sel_var.set("No item selected - pick one in Item Editor.")
 
     def _row(self):
         row = self.app.selected_item_row
         if not row:
-            self.app.set_status("Select an item in the Item Editor tab first.")
+            self.app.set_status("Select an item in Item Editor first.")
             return None
         return row
 
@@ -209,8 +232,9 @@ class ItemStatsTab(BaseTab):
     def _dump_fields(self, client, row):
         try:
             res = client.send("item_stat_dump", row, timeout=60)
-            text = client.read_sidecar("itemstatdump.txt") or "(itemstatdump.txt missing)"
-            self.after(0, lambda: (show_probe(self, "Item stat dump - copy all of it", text),
+            text = client.read_sidecar("itemstatdump.txt") or \
+                "(itemstatdump.txt missing)"
+            self.after(0, lambda: (show_probe(self, "Item stat dump", text),
                                    self.app.set_status(f"Dump done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
@@ -240,7 +264,8 @@ class ItemStatsTab(BaseTab):
             p = res.split(",")
             level = p[0] if len(p) > 0 else "0"
             cap = p[1] if len(p) > 1 else "?"
-            types = [(int(p[2 + t]) if len(p) > 2 + t and p[2 + t].lstrip("-").isdigit() else 0)
+            types = [(int(p[2 + t]) if len(p) > 2 + t
+                      and p[2 + t].lstrip("-").isdigit() else 0)
                      for t in range(3)]
             labels = (self.app.enum_data or {}).get("enhLabels", [])
 
@@ -278,7 +303,8 @@ class ItemStatsTab(BaseTab):
                 idx = list(labels).index(cb.get())
                 types.append(vals[idx])
             except (ValueError, IndexError):
-                self.app.set_status("Read the enhancement first (type list not loaded).")
+                self.app.set_status("Read the enhancement first (type list "
+                                    "not loaded).")
                 return
         client = require_client(self.app)
         if not client:
@@ -316,9 +342,9 @@ class ItemStatsTab(BaseTab):
             self.stat_rows = [f for f, _l, _v in rows]
 
             def _ui():
-                self.stat_listbox.delete(0, tk.END)
-                for f, label, value in rows:
-                    self.stat_listbox.insert(tk.END, f"{label} = {value}")
+                self.panel.set_rows([f"{label} = {value}"
+                                     for _f, label, value in rows])
+                self.panel.set_empty("No stats reported for this item.")
                 if not quiet:
                     self.app.set_status(f"Read {len(rows)} stat(s) ({res}).")
             self.after(0, _ui)
@@ -435,9 +461,11 @@ class ItemStatsTab(BaseTab):
     def _probe_special(self, client, row):
         try:
             res = client.send("item_special_probe", row, timeout=60)
-            text = client.read_sidecar("specialprobe.txt") or "(specialprobe.txt missing)"
-            self.after(0, lambda: (show_probe(self, "Special-effect probe - copy all of it", text),
-                                   self.app.set_status(f"Probe done: {res}.")))
+            text = client.read_sidecar("specialprobe.txt") or \
+                "(specialprobe.txt missing)"
+            self.after(0, lambda: (
+                show_probe(self, "Special-effect probe", text),
+                self.app.set_status(f"Probe done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -452,9 +480,11 @@ class ItemStatsTab(BaseTab):
     def _sweep_specials(self, client):
         try:
             res = client.send("item_special_sweep", timeout=60)
-            text = client.read_sidecar("specialsweep.txt") or "(specialsweep.txt missing)"
-            self.after(0, lambda: (show_probe(self, "Special sweep - copy all of it", text),
-                                   self.app.set_status(f"Sweep done: {res}.")))
+            text = client.read_sidecar("specialsweep.txt") or \
+                "(specialsweep.txt missing)"
+            self.after(0, lambda: (
+                show_probe(self, "Special sweep", text),
+                self.app.set_status(f"Sweep done: {res}.")))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

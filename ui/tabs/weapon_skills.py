@@ -1,15 +1,15 @@
-"""Weapon Skills tab: 6 equipped slots per vocation + unlock/state/level/probes."""
+"""Weapon Skills: six equipped slots per vocation, unlock state and levels."""
 import re
-import tkinter as tk
+
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    run_async, require_client, show_probe, JOB_LABELS,
-    Card, card_content, H1, Muted,
-    PrimaryButton, GhostButton, dev_only, Combo, Check, StyledListbox,
+    Section, PageHeader, Row, ScrollArea, ListPanel, Frame, Combo, Switch,
+    PrimaryButton, GhostButton, QuietButton, caption, dev_only, run_async,
+    require_client, show_probe, JOB_LABELS,
 )
 
 
@@ -30,87 +30,112 @@ class WeaponSkillsTab(BaseTab):
         self.cur_skills = [0] * 6
         self.src_vars = []
         self.skill_combos = []
-        self.skill_ids = [[] for _ in range(6)]  # parallel id lists per slot
+        self.skill_ids = [[] for _ in range(6)]
         self.w_rows = []      # skill ids in the state list
         self.w_info = {}      # id -> probe info string
+        self.w_state = {}
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(1, weight=1)
         app.register_refreshable(self)
 
-        H1(self, "Weapon Skills", row=0, column=0, sticky="w", pady=(0, 8))
+        header = PageHeader(
+            self, "Weapon Skills",
+            "Equip, learn or unlearn weapon skills, and set their level for "
+            "the selected target and vocation.")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
+        header.action(GhostButton(header.actions, "Refresh", width=92,
+                                  command=self.refresh_async))
 
-        # options card: auto-unlock + unlock level
-        opt_card = Card(self, row=1, column=0, sticky="ew", padx=4, pady=6)
-        opt = card_content(opt_card)
+        self.scroll = ScrollArea(self)
+        self.scroll.grid(row=1, column=0, sticky="nsew")
+
+        options = Section(self.scroll, "Learn options", **{
+            "row": 0, "column": 0, "sticky": "ew", "pady": (0, T.PAD_M)})
+        body = options.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
         self.auto_var = ctk.BooleanVar(value=True)
-        Check(opt, "Auto-unlock a skill when equipping it",
-              variable=self.auto_var).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(opt, text="Unlock level:", text_color=T.TEXT).grid(
-            row=0, column=1, sticky="w", padx=(24, 4))
+        Switch(row, text="Learn a skill when equipping it",
+               variable=self.auto_var).pack(side="left")
+        ctk.CTkLabel(row, text="Learn level",
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED).pack(
+            side="left", padx=(T.PAD_XL, T.PAD_S))
         self.lvl_var = ctk.StringVar(value="")
-        self.lvl_combo = Combo(opt, variable=self.lvl_var, values=[], width=170)
-        self.lvl_combo.grid(row=0, column=2, sticky="w")
+        self.lvl_combo = Combo(row, variable=self.lvl_var, values=[], width=170)
+        self.lvl_combo.pack(side="left")
         self._fill_level_combo()
 
-        # slots card: 6 slots
-        slot_card = Card(self, row=2, column=0, sticky="ew", padx=4, pady=6)
-        slots = card_content(slot_card)
+        slots = Section(self.scroll, "Equipped slots",
+                        hint="The source column lists every vocation's "
+                             "skills, so cross-vocation sets stay possible.",
+                        **{"row": 1, "column": 0, "sticky": "ew",
+                           "pady": (0, T.PAD_M)})
+        body = slots.body
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
         for slot in range(6):
-            r = ctk.CTkFrame(slots, fg_color="transparent")
-            r.pack(fill="x", pady=2)
-            ctk.CTkLabel(r, text=f"Slot {slot + 1}", width=55,
-                         text_color=T.TEXT).pack(side="left")
+            cell = Frame(body)
+            cell.grid(row=slot % 3, column=slot // 3, sticky="ew",
+                      padx=(0, T.PAD_M) if slot // 3 == 0 else (0, 0),
+                      pady=2)
+            cell.grid_columnconfigure(2, weight=1)
+            ctk.CTkLabel(cell, text=f"Slot {slot + 1}",
+                         font=T.font(T.SIZE_SMALL), text_color=T.MUTED,
+                         width=44, anchor="w").grid(row=0, column=0,
+                                                    sticky="w")
             src_var = ctk.StringVar(value=JOB_LABELS[0])
-            src = Combo(r, variable=src_var, values=JOB_LABELS, width=170,
+            src = Combo(cell, variable=src_var, values=JOB_LABELS, width=126,
                         command=lambda _v, s=slot: self._on_src(s))
-            src.pack(side="left", padx=4)
+            src.grid(row=0, column=1, sticky="w", padx=(T.PAD_XS, T.PAD_XS))
             self.src_vars.append(src_var)
-            kc = Combo(r, values=["(none)"], width=420,
+            kc = Combo(cell, values=["(none)"],
                        command=lambda _v, s=slot: self._on_skill(s))
             kc.set("(none)")
-            kc.pack(side="left", padx=4)
+            kc.grid(row=0, column=2, sticky="ew")
             self.skill_combos.append(kc)
-        brow = ctk.CTkFrame(slots, fg_color="transparent")
-        brow.pack(fill="x", pady=(8, 0))
-        PrimaryButton(brow, "Refresh", command=self.refresh_async,
-                      width=90).pack(side="left")
-        GhostButton(brow, "Clear all 6 slots", command=self.clear_async,
-                    width=140).pack(side="left", padx=8)
+        row = Row(body)
+        row.grid(row=3, column=0, columnspan=2, sticky="w",
+                 pady=(T.PAD_S, 0))
+        row.add(QuietButton(row, "Clear all 6 slots", width=140,
+                            command=self.clear_async))
 
-        # unlock card: state list + buttons
-        unl_card = Card(self, row=3, column=0, sticky="nsew", padx=4, pady=6)
-        unl = card_content(unl_card)
-        unl.grid_columnconfigure(0, weight=1)
-        unl.grid_rowconfigure(1, weight=1)
-        Muted(unl, "Unlock weapon skills / set level (uses the Unlock level box above).",
-              row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
-        self.wlist = StyledListbox(unl)
-        self.wlist.grid(row=1, column=0, sticky="nsew")
-        sb = tk.Scrollbar(unl, orient="vertical", command=self.wlist.yview)
-        sb.grid(row=1, column=1, sticky="ns")
-        self.wlist.config(yscrollcommand=sb.set)
+        unlock = Section(self.scroll, "Skill states",
+                         hint="Equipped skills are never unlearned; clear "
+                              "their slot first.",
+                         **{"row": 2, "column": 0, "sticky": "ew"})
+        body = unlock.body
+        body.grid_rowconfigure(2, weight=1)
 
-        bcol = ctk.CTkFrame(unl, fg_color="transparent")
-        bcol.grid(row=1, column=2, sticky="ns", padx=(8, 0))
-        PrimaryButton(bcol, "Unlock selected", width=200,
-                      command=self.unlock_selected_async).pack(pady=3)
-        GhostButton(bcol, "Unlock ALL (this vocation)", width=200,
-                    command=lambda: self.unlock_all_async(0)).pack(pady=3)
-        GhostButton(bcol, "Unlock EVERY vocation", width=200,
-                    command=lambda: self.unlock_all_async(-1)).pack(pady=3)
-        dev_only(self, lambda: GhostButton(bcol, "Probe levels / upgrades", width=200,
-                    command=self.probe_async).pack(pady=3))
-        GhostButton(bcol, "Add missing entry", width=200,
-                    command=self.add_entry_async).pack(pady=3)
-        GhostButton(bcol, "Set level of selected", width=200,
-                    command=self.set_level_async).pack(pady=3)
-        ctk.CTkLabel(bcol, **T.muted("Uses the 'Unlock level' box above.")).pack(pady=(6, 2))
-        dev_only(self, lambda: GhostButton(bcol, "Probe equipment abilities", width=200,
-                    command=lambda: self.eq_probe_async("eqability_probe", "eqability.txt",
-                                                        "Equipment ability probe")).pack(pady=3))
-        dev_only(self, lambda: GhostButton(bcol, "Probe abilities (part 2)", width=200,
-                    command=lambda: self.eq_probe_async("eqability_probe2", "eqability2.txt",
-                                                        "Equipment ability probe 2")).pack(pady=3))
+        bar1 = Row(body)
+        bar1.grid(row=0, column=0, sticky="ew")
+        bar1.add(PrimaryButton(bar1, "Learn selected", width=160,
+                               command=self.unlock_selected_async))
+        bar1.add(GhostButton(bar1, "Learn all (vocation)", width=160,
+                             command=lambda: self.unlock_all_async(0)))
+        bar1.add(GhostButton(bar1, "Learn every vocation", width=160,
+                             command=lambda: self.unlock_all_async(-1)))
+        bar1.add(GhostButton(bar1, "Unlearn selected", width=160,
+                             command=self.unlearn_selected_async))
+
+        bar2 = Row(body)
+        bar2.grid(row=1, column=0, sticky="ew", pady=(T.PAD_XS, T.PAD_S))
+        bar2.add(GhostButton(bar2, "Unlearn all (vocation)", width=160,
+                             command=self.unlearn_all_async))
+        bar2.add(QuietButton(bar2, "Set level of selected", width=160,
+                             command=self.set_level_async))
+        bar2.add(QuietButton(bar2, "Add missing entry", width=160,
+                             command=self.add_entry_async))
+        dev_only(self, lambda: QuietButton(
+            bar2, "Probe levels", width=120,
+            command=self.probe_async).pack(side="left"))
+
+        self.panel = ListPanel(body, height=7,
+                               empty="Refresh to read the skill states.")
+        self.panel.grid(row=2, column=0, sticky="nsew")
+        self.wlist = self.panel.listbox
+        caption(body, "Level uses the Learn level box above. Unlearning is "
+                      "undone with Ctrl+Z.",
+                row=3, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
     # -- enum helpers -------------------------------------------------
 
@@ -124,14 +149,16 @@ class WeaponSkillsTab(BaseTab):
 
     def _unlock_level(self):
         try:
-            return self._level_values[self.lvl_combo.cget("values").index(self.lvl_var.get())]
+            return self._level_values[
+                list(self.lvl_combo.cget("values")).index(self.lvl_var.get())]
         except (ValueError, AttributeError, IndexError):
             return 1
 
     def _enums(self):
         E = self.app.enum_data or {}
         if not E.get("jobsCustom"):
-            self.app.set_status("Click Connect first (Connection tab).")
+            self.app.set_status("Connect first - the skill tables load with "
+                                "the session.")
             return None
         return E
 
@@ -186,16 +213,18 @@ class WeaponSkillsTab(BaseTab):
         lvl = self._unlock_level() if self.auto_var.get() else -1
         tgt, job = self.app.target(), self.app.job()
         self.app.set_status(f"Setting slot {slot + 1}...")
-        run_async(self, lambda: self._do_set(client, tgt, job, slot, sid, lvl, label))
+        run_async(self, lambda: self._do_set(client, tgt, job, slot, sid, lvl,
+                                             label))
 
     def _do_set(self, client, tgt, job, slot, sid, lvl, label):
         try:
             client.send("set_wskill", tgt, job, slot, sid, lvl, timeout=15)
-            self.after(0, lambda: self.app.set_status(f"Slot {slot + 1} -> {label}"))
+            self.after(0, lambda: self.app.set_status(
+                f"Slot {slot + 1} → {label}"))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
-        self.refresh_async(quiet=True)
+        self.after(0, lambda: self.refresh_async(quiet=True))
 
     # -- refresh ------------------------------------------------------
 
@@ -254,15 +283,30 @@ class WeaponSkillsTab(BaseTab):
             self.after(0, lambda: self.app.set_status(err))
 
     def _apply_wstate(self, rows, custom_name):
-        self.wlist.delete(0, tk.END)
+        labels = []
         self.w_rows = []
         self.w_state = {}
         for sid, en, lv in rows:
             self.w_state[sid] = (en, lv)
             self.w_rows.append(sid)
             name = custom_name.get(sid, str(sid))
-            extra = f"   | {self.w_info[sid]}" if sid in self.w_info else ""
-            self.wlist.insert(tk.END, f"{name}    enabled={en}  level={lv}{extra}")
+            state = "learned" if str(en).lower() in ("true", "1") \
+                else "not learned"
+            extra = f"   · {self.w_info[sid]}" if sid in self.w_info else ""
+            labels.append(f"{name}    {state}  ·  level {lv}{extra}")
+        self.panel.set_rows(labels)
+        self.panel.set_empty("No skill states reported for this vocation.")
+
+    def _is_learned(self, sid):
+        state = self.w_state.get(sid)
+        return bool(state) and str(state[0]).lower() in ("true", "1")
+
+    def _state_level(self, sid):
+        state = self.w_state.get(sid)
+        try:
+            return int(str(state[1]))
+        except (TypeError, ValueError):
+            return 1
 
     def refresh_skills(self):
         self._fill_level_combo()
@@ -289,7 +333,7 @@ class WeaponSkillsTab(BaseTab):
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
         if after:
-            after()
+            self.after(0, after)
 
     def _selected_id(self):
         sel = self.wlist.curselection()
@@ -307,12 +351,12 @@ class WeaponSkillsTab(BaseTab):
             return
         tgt, lvl = self.app.target(), self._unlock_level()
         run_async(self, lambda: self._do_simple(
-            client, "unlock_wskill", (tgt, sid, lvl), "Unlocked.",
+            client, "unlock_wskill", (tgt, sid, lvl), "Learned.",
             lambda: self._do_wstate(client, tgt, self.app.job(),
                                     self.app.enum_data or {})))
 
     def unlock_all_async(self, which):
-        """which=0 -> this vocation (job), which=-1 -> EVERY vocation (job 0)."""
+        """which=0 -> this vocation, which=-1 -> every vocation (job 0)."""
         client = require_client(self.app)
         if not client:
             return
@@ -320,9 +364,9 @@ class WeaponSkillsTab(BaseTab):
                  f"vocation {self.app.job():02d}")
         n = len(getattr(self, "w_rows", []) or [])
         what = (f"This writes to your save: weapon skills for {scope} "
-                f"will be unlocked at the chosen level"
+                f"will be learned at the chosen level"
                 + (f" ({n} skills in the current list)." if n else "."))
-        if not self.app.confirm_bulk("Unlock all weapon skills", what):
+        if not self.app.confirm_bulk("Learn all weapon skills", what):
             return
         tgt, job = self.app.target(), self.app.job() if which == 0 else 0
         lvl = self._unlock_level()
@@ -330,6 +374,91 @@ class WeaponSkillsTab(BaseTab):
             client, "unlock_wskills", (tgt, job, lvl), None,
             lambda: self._do_wstate(client, tgt, self.app.job(),
                                     self.app.enum_data or {})))
+
+    # -- unlearn -------------------------------------------------------
+
+    @staticmethod
+    def _unlearn_msg(res):
+        if res.lower().startswith(("already", "nothing")):
+            return res
+        return f"Unlearned: {res}"
+
+    def unlearn_selected_async(self):
+        sid = self._selected_id()
+        if sid is None:
+            return
+        if not self._is_learned(sid):
+            self.app.set_status("That weapon skill is already unlearned.")
+            return
+        if sid in self.cur_skills:
+            slots = [str(i + 1) for i, s in enumerate(self.cur_skills)
+                     if s == sid]
+            self.app.set_status(
+                "That skill is equipped in slot " + ", ".join(slots)
+                + ". Clear the slot first, then unlearn it.")
+            return
+        client = require_client(self.app)
+        if not client:
+            return
+        tgt, lvl = self.app.target(), self._state_level(sid)
+        run_async(self, lambda: self._do_unlearn(client, tgt, sid, lvl))
+
+    def _do_unlearn(self, client, tgt, sid, lvl):
+        try:
+            res = client.send("disable_wskill", tgt, sid, timeout=20)
+            if not res.lower().startswith(("already", "nothing")):
+                self.app.record_undo(
+                    f"weapon skill {sid}",
+                    lambda c, t=tgt, s=sid, l=lvl: c.send(
+                        "unlock_wskill", t, s, l, timeout=20))
+            self.after(0, lambda: (
+                self.app.set_status(self._unlearn_msg(res)),
+                self.refresh_async(quiet=True)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Unlearn failed: {e}"
+            self.after(0, lambda: self.app.set_status(err))
+
+    def unlearn_all_async(self):
+        client = require_client(self.app)
+        if not client:
+            return
+        learned = [sid for sid in self.w_rows if self._is_learned(sid)]
+        if not learned:
+            self.app.set_status("No learned weapon skills in this list.")
+            return
+        equipped = set(self.cur_skills)
+        candidates = [sid for sid in learned if sid not in equipped]
+        if not candidates:
+            self.app.set_status(
+                "Every learned skill here is equipped; clear the slots first.")
+            return
+        job = self.app.job()
+        if not self.app.confirm_bulk(
+                "Unlearn weapon skills",
+                f"This writes to your save: {len(candidates)} learned weapon "
+                f"skill(s) for vocation {job:02d} will be unlearned. "
+                "Equipped skills are skipped. Ctrl+Z relearns them."):
+            return
+        snapshot = [(sid, self._state_level(sid)) for sid in learned]
+        tgt = self.app.target()
+        run_async(self, lambda: self._do_unlearn_all(client, tgt, job,
+                                                     snapshot))
+
+    def _do_unlearn_all(self, client, tgt, job, snapshot):
+        try:
+            res = client.send("disable_wskills", tgt, job, timeout=60)
+            if not res.lower().startswith("nothing"):
+                def _undo(c, snap=tuple(snapshot), t=tgt):
+                    for sid, lvl in snap:
+                        c.send("unlock_wskill", t, sid, lvl, timeout=20)
+                    return f"relearned {len(snap)} weapon skill(s)"
+                self.app.record_undo("unlearn weapon skills", _undo)
+            self.after(0, lambda: (
+                self.app.set_status(self._unlearn_msg(res)),
+                self.refresh_async(quiet=True)))
+        except (BridgeError, BridgeTimeout) as e:
+            err = f"Unlearn failed: {e}"
+            self.after(0, lambda: self.app.set_status(err))
 
     def set_level_async(self):
         sid = self._selected_id()
@@ -343,8 +472,7 @@ class WeaponSkillsTab(BaseTab):
         state = getattr(self, "w_state", {}).get(sid)
         if state and str(state[1]).lstrip("-").isdigit():
             prev = int(state[1])
-        run_async(self, lambda: self._do_set_level(
-            client, tgt, sid, lvl, prev))
+        run_async(self, lambda: self._do_set_level(client, tgt, sid, lvl, prev))
 
     def _do_set_level(self, client, tgt, sid, lvl, prev):
         try:
@@ -358,16 +486,15 @@ class WeaponSkillsTab(BaseTab):
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
-        self._do_wstate(client, tgt, self.app.job(),
-                        self.app.enum_data or {})
-        self.refresh_async(quiet=True)
+        self._do_wstate(client, tgt, self.app.job(), self.app.enum_data or {})
+        self.after(0, lambda: self.refresh_async(quiet=True))
 
     def probe_async(self):
         client = require_client(self.app)
         if not client:
             return
         tgt, job = self.app.target(), self.app.job()
-        self.app.set_status("Probing weapon skills (calls every read-only skill getter)...")
+        self.app.set_status("Probing weapon skills (read-only)...")
         run_async(self, lambda: self._do_probe(client, tgt, job))
 
     def _do_probe(self, client, tgt, job):
@@ -377,13 +504,14 @@ class WeaponSkillsTab(BaseTab):
             info = {}
             for line in text.splitlines():
                 parts = line.split("\t", 2)
-                if len(parts) == 3 and parts[0].lstrip("-").isdigit() and parts[2]:
+                if len(parts) == 3 and parts[0].lstrip("-").isdigit() \
+                        and parts[2]:
                     info[int(parts[0])] = parts[2]
             self.w_info = info
             self.after(0, lambda: (
-                show_probe(self, "Weapon skill probe", text or "(wskill_info.txt missing)"),
-                self.app.set_status(f"Probe: {res}"),
-            ))
+                show_probe(self, "Weapon skill probe",
+                           text or "(wskill_info.txt missing)"),
+                self.app.set_status(f"Probe: {res}")))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -397,7 +525,8 @@ class WeaponSkillsTab(BaseTab):
         if not client:
             return
         tgt, lvl = self.app.target(), self._unlock_level()
-        self.app.set_status(f"Adding missing EnabledCustomSkills entry for skill {sid} at level {lvl}...")
+        self.app.set_status(f"Adding missing EnabledCustomSkills entry for "
+                            f"skill {sid} at level {lvl}...")
         run_async(self, lambda: self._do_add_entry(client, tgt, sid, lvl))
 
     def _do_add_entry(self, client, tgt, sid, lvl):
@@ -414,8 +543,10 @@ class WeaponSkillsTab(BaseTab):
         if not client:
             return
         tgt, job = self.app.target(), self.app.job()
-        self.app.set_status("Probing (equip the weapon with the upgraded skills first)...")
-        run_async(self, lambda: self._do_eq_probe(client, cmd, filename, title, tgt, job))
+        self.app.set_status("Probing (equip the weapon with the upgraded "
+                            "skills first)...")
+        run_async(self, lambda: self._do_eq_probe(client, cmd, filename,
+                                                  title, tgt, job))
 
     def _do_eq_probe(self, client, cmd, filename, title, tgt, job):
         try:
@@ -424,8 +555,7 @@ class WeaponSkillsTab(BaseTab):
             n = len(text.splitlines())
             self.after(0, lambda: (
                 show_probe(self, title, text),
-                self.app.set_status(f"Probe done: {res} ({n} lines)."),
-            ))
+                self.app.set_status(f"Probe done: {res} ({n} lines).")))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

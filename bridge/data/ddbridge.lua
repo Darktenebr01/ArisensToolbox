@@ -1,4 +1,4 @@
--- ddbridge.lua  v1.89.3  (Dragon's Dogma 2 / REFramework)
+-- ddbridge.lua  v1.89.82  (Dragon's Dogma 2 / REFramework)
 -- Command bridge for the Arisen's Toolbox companion app.
 -- Install: <DD2 folder>\reframework\autorun\ddbridge.lua
 -- The app writes a command to reframework\data\ddbridge\cmd.txt, this script runs it
@@ -263,7 +263,7 @@ local function toint(v) return (math.tointeger and math.tointeger(v)) or v end
 -- each command gets the argument list (strings) and returns a one-line string payload
 local COMMANDS = {}
 
-COMMANDS.ping = function() return "pong ddbridge 1.89.3 boot=" .. BOOT end
+COMMANDS.ping = function() return "pong ddbridge 1.89.82 boot=" .. BOOT end
 
 COMMANDS.list_items = function() return tostring(build_items()) end
 
@@ -1068,6 +1068,181 @@ COMMANDS.unlock_wskill = function(a)
   return "ok"
 end
 
+------------------------------------------------ v1.89.81 unlearn weapon skills
+-- A learned weapon skill is an entry in SkillContext.EnabledCustomSkills
+-- (app.HumanSkillContext.EnabledCustomSkill: CustomSkillID + Level). Removing
+-- the entry is the unlearn route; every id is verified with
+-- isCustomSkillEnable afterwards. If direct removal is not exposed on this
+-- build, the list is rebuilt from the still-enabled skills with their levels.
+-- Equipped skills are never removed: a slot that points at a forgotten skill
+-- would leave the loadout in a state the game UI cannot fix.
+do
+  local function w_list(c)
+    return try(function() return c.skill:get_field("EnabledCustomSkills") end)
+  end
+
+  local function w_enabled(c, id)
+    return try(function() return c.skill:call("isCustomSkillEnable", id) end)
+  end
+
+  local function w_level(c, id)
+    return tonumber(try(function() return c.skill:call("getCustomSkillLevel", id) end)) or 1
+  end
+
+  local function w_equipped(c)
+    local out = {}
+    for j = 1, 10 do
+      for slot = 0, 5 do
+        local id = tonumber(try(function() return c.skill:call("getSkillID", j, slot) end)) or 0
+        if id ~= 0 then out[id] = true end
+      end
+    end
+    return out
+  end
+
+  local function w_entries(list)
+    local els = coll_elems(list)
+    if #els > 0 then return els end
+    local cnt = tonumber(try(function() return list:call("get_Count") end)) or 0
+    for i = 0, cnt - 1 do
+      local e = try(function() return list:call("get_Item", i) end)
+      if e ~= nil then els[#els + 1] = e end
+    end
+    return els
+  end
+
+  local function w_entry_id(e)
+    if type(e) ~= "userdata" then return nil end
+    return tonumber(try(function() return e:get_field("CustomSkillID") end))
+  end
+
+  local function w_remove(list, id)
+    local els = w_entries(list)
+    for i, e in ipairs(els) do
+      if w_entry_id(e) == id then
+        if pcall(function() list:call("RemoveAt", i - 1) end) then
+          return true, "RemoveAt(" .. (i - 1) .. ")"
+        end
+        if pcall(function() list:call("Remove", e) end) then
+          return true, "Remove(entry)"
+        end
+        break
+      end
+    end
+    return false, "no removal method"
+  end
+
+  local function w_clear(list)
+    if pcall(function() list:call("Clear") end) then return true end
+    if pcall(function() list:call("Clear()") end) then return true end
+    return false
+  end
+
+  local function w_add_entry(list, id, lvl)
+    local td = sdk.find_type_definition("app.HumanSkillContext.EnabledCustomSkill")
+    local obj
+    pcall(function() if td and td.create_instance then obj = td:create_instance() end end)
+    if type(obj) ~= "userdata" and sdk.create_instance then
+      pcall(function() obj = sdk.create_instance("app.HumanSkillContext.EnabledCustomSkill") end)
+    end
+    if type(obj) ~= "userdata" then return false end
+    pcall(function() obj:set_field("CustomSkillID", id) end)
+    pcall(function() obj:set_field("Level", lvl) end)
+    pcall(function() obj:set_field("IsViewedNew", false) end)
+    return pcall(function() list:call("Add", obj) end)
+  end
+
+  local function w_unlearn(c, ids)
+    local list = w_list(c)
+    if type(list) ~= "userdata" then error("SkillContext.EnabledCustomSkills not found") end
+    local equipped = w_equipped(c)
+    local remove, skipped = {}, 0
+    for _, id in ipairs(ids) do
+      if equipped[id] then skipped = skipped + 1 else remove[#remove + 1] = id end
+    end
+    if #remove == 0 then
+      return "nothing to unlearn - " .. skipped .. " learned skill(s) are equipped; clear their slots first"
+    end
+
+    local steps, removed = {}, 0
+    for _, id in ipairs(remove) do
+      local ok, how = w_remove(list, id)
+      if ok then
+        removed = removed + 1
+        steps[#steps + 1] = tostring(id) .. " " .. how
+      end
+    end
+
+    local function still_enabled()
+      local out = {}
+      for _, id in ipairs(remove) do
+        if w_enabled(c, id) == true then out[#out + 1] = id end
+      end
+      return out
+    end
+
+    local still = still_enabled()
+    local lost = {}
+    if #still > 0 then
+      local keep = {}
+      for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+        if ent.value ~= 0 and w_enabled(c, ent.value) == true then
+          local wanted = false
+          for _, id in ipairs(remove) do
+            if id == ent.value then wanted = true break end
+          end
+          if not wanted then
+            keep[#keep + 1] = { id = ent.value, lvl = w_level(c, ent.value) }
+          end
+        end
+      end
+      if not w_clear(list) then
+        error("could not clear EnabledCustomSkills (still enabled: "
+              .. table.concat(still, ",") .. ")")
+      end
+      for _, k in ipairs(keep) do
+        w_add_entry(list, k.id, k.lvl)
+        if w_enabled(c, k.id) ~= true then lost[#lost + 1] = k.id end
+      end
+      steps[#steps + 1] = "rebuilt list, kept " .. tostring(#keep)
+      still = still_enabled()
+    end
+
+    local verified = 0
+    for _, id in ipairs(remove) do
+      if w_enabled(c, id) == false then verified = verified + 1 end
+    end
+    local r = verified .. "/" .. #remove .. " unlearned"
+    if #steps > 0 then r = r .. " (" .. table.concat(steps, ", ") .. ")" end
+    if skipped > 0 then r = r .. "; skipped " .. skipped .. " equipped" end
+    if #still > 0 then r = r .. "; STILL ENABLED: " .. table.concat(still, ",") end
+    if #lost > 0 then r = r .. "; WARNING: re-enable failed for " .. table.concat(lost, ",") end
+    log.info(TAG .. "wskill unlearn: " .. r)
+    return r
+  end
+
+  COMMANDS.disable_wskill = function(a)
+    local c = get_target(a[1])
+    local id = int(a[2])
+    if w_enabled(c, id) == false then return "already unlearned" end
+    return w_unlearn(c, { id })
+  end
+
+  COMMANDS.disable_wskills = function(a)
+    local c = get_target(a[1])
+    local job = int(a[2])
+    local ids = {}
+    for _, ent in ipairs(enum_list("app.HumanCustomSkillID")) do
+      if ent.value ~= 0 and (job == 0 or job_of(ent.name) == job)
+          and w_enabled(c, ent.value) == true then
+        ids[#ids + 1] = ent.value
+      end
+    end
+    if #ids == 0 then return "nothing to unlearn - no weapon skill is learned" end
+    return w_unlearn(c, ids)
+  end
+end
+
 -- rows "id,enabled,level;..." for the weapon skills of one vocation
 COMMANDS.get_wstate = function(a)
   local c = get_target(a[1])
@@ -1544,6 +1719,152 @@ COMMANDS.enable_nskills = function(a)
   local r = set .. "/" .. total .. " set, " .. verified .. " read back enabled"
   if #failed > 0 then r = r .. "; NOT enabled: " .. table.concat(failed, " ") end
   return r
+end
+
+------------------------------------------------ v1.89.80 unlearn core skills
+-- Enabled core skills live in SkillContext.EnableNormalSkills (a List).
+-- Clearing that list is what the community "Reset normal skill" mod does;
+-- removing a single id from it also works. Both routes are tried per id, and
+-- every affected id is verified with isNormalSkillEnable before reporting.
+do
+  local function n_list(c)
+    return try(function() return c.skill:get_field("EnableNormalSkills") end)
+  end
+
+  local function n_enabled(c, id)
+    return try(function() return c.skill:call("isNormalSkillEnable", id) end)
+  end
+
+  local function n_item_id(v)
+    local n = tonumber(v)
+    if n then return n end
+    if type(v) == "userdata" then
+      n = tonumber(try(function() return v:get_field("value__") end))
+      if n then return n end
+      n = tonumber(tostring(v):match("(%d+)"))
+      if n then return n end
+    end
+    return nil
+  end
+
+  local function n_remove(list, id)
+    local count = tonumber(try(function() return list:call("get_Count") end))
+    if count then
+      for i = 0, count - 1 do
+        local v = try(function() return list:call("get_Item", i) end)
+        if n_item_id(v) == id then
+          if pcall(function() list:call("RemoveAt", i) end) then
+            return true, "RemoveAt(" .. i .. ")"
+          end
+          break
+        end
+      end
+    end
+    if pcall(function() list:call("Remove", id) end) then
+      return true, "Remove(id)"
+    end
+    return false, "no removal method worked"
+  end
+
+  local function n_clear(list)
+    if pcall(function() list:call("Clear") end) then return true end
+    if pcall(function() list:call("Clear()") end) then return true end
+    return false
+  end
+
+  local function n_add(c, list, id)
+    -- setNormalSkillEnable is the path the enable commands use; List.Add is
+    -- the fallback if that overload is not present on this build.
+    if pcall(call_ov, c.skill, "setNormalSkillEnable", "HumanNormalSkillID", 1, id) then
+      return true
+    end
+    return pcall(function() list:call("Add", id) end)
+  end
+
+  local function n_unlearn(c, remove)
+    local list = n_list(c)
+    if not list then error("SkillContext.EnableNormalSkills not found") end
+    local steps, removed = {}, 0
+    for _, id in ipairs(remove) do
+      local ok, how = n_remove(list, id)
+      if ok then
+        removed = removed + 1
+        steps[#steps + 1] = tostring(id) .. " " .. how
+      end
+    end
+
+    local function still_enabled()
+      local out = {}
+      for _, id in ipairs(remove) do
+        if n_enabled(c, id) == true then out[#out + 1] = id end
+      end
+      return out
+    end
+
+    local still = still_enabled()
+    local lost = {}
+    if #still > 0 then
+      -- Fallback: rebuild the list from the state the game reports.
+      local keep = {}
+      for _, ent in ipairs(enum_list("app.HumanNormalSkillID")) do
+        if ent.value ~= 0 and n_enabled(c, ent.value) == true then
+          local wanted = false
+          for _, id in ipairs(remove) do
+            if id == ent.value then wanted = true break end
+          end
+          if not wanted then keep[#keep + 1] = ent.value end
+        end
+      end
+      if not n_clear(list) then
+        error("could not clear EnableNormalSkills (still enabled: "
+              .. table.concat(still, ",") .. ")")
+      end
+      for _, id in ipairs(keep) do
+        n_add(c, list, id)
+        if n_enabled(c, id) ~= true then lost[#lost + 1] = id end
+      end
+      steps[#steps + 1] = "rebuilt list, kept " .. tostring(#keep)
+      still = still_enabled()
+    end
+
+    local verified = 0
+    for _, id in ipairs(remove) do
+      if n_enabled(c, id) == false then verified = verified + 1 end
+    end
+    local r = verified .. "/" .. #remove .. " unlearned"
+    if #steps > 0 then r = r .. " (" .. table.concat(steps, ", ") .. ")" end
+    if #still > 0 then
+      r = r .. "; STILL ENABLED: " .. table.concat(still, ",")
+    end
+    if #lost > 0 then
+      r = r .. "; WARNING: re-enable failed for " .. table.concat(lost, ",")
+    end
+    log.info(TAG .. "unlearn: " .. r)
+    return r
+  end
+
+  COMMANDS.disable_nskill = function(a)
+    local c = get_target(a[1])
+    local id = int(a[2])
+    if n_enabled(c, id) == false then return "already unlearned" end
+    return n_unlearn(c, { id })
+  end
+
+  COMMANDS.disable_nskills = function(a)
+    local c = get_target(a[1])
+    local job = int(a[2])
+    local incl_other = (a[3] == "all")
+    local remove = {}
+    for _, ent in ipairs(enum_list("app.HumanNormalSkillID")) do
+      local j = job_of(ent.name)
+      if ent.value ~= 0 and (j == job or (incl_other and j == nil))
+          and n_enabled(c, ent.value) == true then
+        remove[#remove + 1] = ent.value
+      end
+    end
+    if #remove == 0 then return "nothing to unlearn - no core skill is enabled" end
+    return n_unlearn(c, remove)
+  end
 end
 
 ---------------------------------------------------------------- v1.1 augments
@@ -4954,6 +5275,9153 @@ COMMANDS.respawn_clear = function(a)
   return table.concat(lines, " | ")
 end
 
+---------------------------------------------------------------- v1.89.5: summon-boss probe
+-- Research pass for a future "summon boss near the player" feature.
+-- Dumps the spawn-relevant surface (character catalog, CharacterManager,
+-- GenerateManager, pawn/enemy managers, loaded characters) to
+-- summon_probe.txt and returns a one-line summary. Read-only: it never
+-- calls any generate/create method, it only lists names.
+-- Shared summon state, declared before the probes: probe step 5
+-- stages a container here for summon_verify to re-read.
+local SUMMON = { ctrl = nil, name = nil, chara = nil, uniq = nil, queued = false, cont = nil }
+
+COMMANDS.summon_probe = function()
+  local out = {}
+  local function L(x) out[#out + 1] = x end
+  local KEYS = { "generat", "spawn", "create", "request", "summon",
+                 "chara", "regist", "repop", "appear", "call" }
+  local function keyhit(name)
+    local l = name:lower()
+    for _, k in ipairs(KEYS) do if l:find(k, 1, true) then return true end end
+    return false
+  end
+  local function dump_methods(td, label)
+    if not td then L(label .. ": TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local n = 0
+    for _, m in ipairs(ms) do
+      local mn = try(function() return m:get_name() end) or ""
+      if keyhit(mn) then
+        local pts = try(function() return m:get_param_types() end) or {}
+        local ps = {}
+        for _, t in ipairs(pts) do
+          ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+        end
+        local rt = try(function() return m:get_return_type() end)
+        L("  method " .. mn .. "(" .. table.concat(ps, ", ") .. ") -> " ..
+          tostring(rt and try(function() return rt:get_full_name() end) or "?"))
+        n = n + 1
+        if n >= 120 then L("  ... (method list capped)") break end
+      end
+    end
+    L("  (" .. n .. " spawn-ish methods of " .. #ms .. " total)")
+  end
+  local function dump_fields(td, label, inst)
+    if not td then return end
+    local fs = try(function() return td:get_fields() end) or {}
+    local shown = 0
+    for _, f in ipairs(fs) do
+      local fn = try(function() return f:get_name() end) or ""
+      if keyhit(fn) or inst then
+        local ft = try(function() return f:get_type() end)
+        local line = "  field " .. fn .. " : " ..
+          tostring(ft and try(function() return ft:get_full_name() end) or "?")
+        if inst then
+          local v = try(function() return f:get_data(inst) end)
+          if type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+            line = line .. " = " .. tostring(v)
+          elseif v ~= nil then
+            local vt = try(function() return v:get_type_definition() end)
+            line = line .. " = <" ..
+              tostring(vt and try(function() return vt:get_full_name() end) or type(v)) .. ">"
+          end
+        end
+        L(line)
+        shown = shown + 1
+        if shown >= 80 then L("  ... (field list capped)") break end
+      end
+    end
+  end
+
+  L("== summon_probe (bridge 1.89.67) ==")
+
+  -- 1. character catalog: the ID enum, if one exists
+  for _, tname in ipairs({ "app.CharacterID", "app.CharaID",
+                           "app.CharacterId", "app.CharaId" }) do
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    if td then
+      L("== catalog type " .. tname .. " ==")
+      local fs = try(function() return td:get_fields() end) or {}
+      local n = 0
+      for _, f in ipairs(fs) do
+        local fn = try(function() return f:get_name() end) or ""
+        local v = try(function() return f:get_data(nil) end)
+        L("  " .. fn .. " = " .. tostring(v))
+        n = n + 1
+        if n >= 400 then L("  ... (catalog capped at 400)") break end
+      end
+      L("  (" .. n .. " entries)")
+    end
+  end
+
+  -- 2. the managers that could create a character
+  for _, tname in ipairs({ "app.CharacterManager", "app.GenerateManager",
+                           "app.GenerateDefaultParameter", "app.EnemyManager",
+                           "app.PawnManager" }) do
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== " .. tname .. " ==")
+    dump_methods(td, tname)
+    local inst = td and try(function() return sdk.get_managed_singleton(tname) end)
+    dump_fields(td, tname, inst)
+    if not inst then L("  (no singleton instance)") end
+  end
+
+  -- 3. who is loaded right now (shows how enemies register as characters)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+  if player then
+    local go = try(function() return player:call("get_GameObject") end)
+    local tr = go and try(function() return go:call("get_Transform") end)
+    local pos = tr and try(function() return tr:call("get_Position") end)
+    L("== player position: " .. tostring(pos and
+      (tostring(pos.x) .. ", " .. tostring(pos.y) .. ", " .. tostring(pos.z)) or "?") .. " ==")
+  else
+    L("== player not found (not loaded into the game?) ==")
+  end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe.txt", text) then error("could not write summon_probe.txt") end
+  return "summon_probe.txt written: " .. #out .. " lines"
+end
+
+do
+---------------------------------------------------------------- v1.89.5: summon probe step 2
+-- Step 1 found the pipeline shape: GenerateManager can build a character
+-- container (getPoolGenerateInfoContainerForCharacter) and generate from
+-- it (requestGenerate). What step 1 did not show: the enum VALUES those
+-- calls take (GeneratorCategory, LayerTypeEnum, InitSetTypeEnum,
+-- GenerateOprionFlags), the container type's own shape, and the full
+-- CharacterID catalog (it capped at 400). This dumps exactly those.
+-- Read-only again: lists names/values, calls nothing.
+COMMANDS.summon_probe2 = function()
+  local out = {}
+  local function L(x) out[#out + 1] = x end
+
+  local function dump_enum(tname)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== enum " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local fs = try(function() return td:get_fields() end) or {}
+    local n = 0
+    for _, f in ipairs(fs) do
+      local fn = try(function() return f:get_name() end) or ""
+      if fn ~= "value__" then
+        local v = try(function() return f:get_data(nil) end)
+        L("  " .. fn .. " = " .. tostring(v))
+        n = n + 1
+      end
+    end
+    L("  (" .. n .. " members)")
+  end
+
+  local function dump_type_full(tname, cap)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== type " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local n = 0
+    for _, m in ipairs(ms) do
+      local mn = try(function() return m:get_name() end) or ""
+      local pts = try(function() return m:get_param_types() end) or {}
+      local ps = {}
+      for _, t in ipairs(pts) do
+        ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+      end
+      local rt = try(function() return m:get_return_type() end)
+      L("  method " .. mn .. "(" .. table.concat(ps, ", ") .. ") -> " ..
+        tostring(rt and try(function() return rt:get_full_name() end) or "?"))
+      n = n + 1
+      if n >= cap then L("  ... (method list capped)") break end
+    end
+    local fs = try(function() return td:get_fields() end) or {}
+    local shown = 0
+    for _, f in ipairs(fs) do
+      local fn = try(function() return f:get_name() end) or ""
+      local ft = try(function() return f:get_type() end)
+      L("  field " .. fn .. " : " ..
+        tostring(ft and try(function() return ft:get_full_name() end) or "?"))
+      shown = shown + 1
+      if shown >= cap then L("  ... (field list capped)") break end
+    end
+    L("  (" .. n .. " methods, " .. shown .. " fields)")
+  end
+
+  L("== summon_probe2 (bridge 1.89.67) ==")
+
+  for _, tname in ipairs({ "app.GeneratorCategory", "app.LayerTypeEnum",
+                           "app.GenerateDefine.InitSetTypeEnum",
+                           "app.GenerateManager.GenerateOprionFlags",
+                           "app.GenerateManager.GenerateOptionFlags",
+                           "app.RequestTypeEnum" }) do
+    dump_enum(tname)
+  end
+
+  dump_type_full("app.GenerateInfo.GenerateInfoContainer", 200)
+  dump_type_full("app.GenerateInfo.CommonInfoData", 200)
+  dump_type_full("app.GenerateController", 120)
+
+  for _, tname in ipairs({ "app.GenerateManager", "app.CharacterManager",
+                           "app.EnemyManager", "app.PawnManager" }) do
+    local inst = try(function() return sdk.get_managed_singleton(tname) end)
+    L("singleton " .. tname .. ": " .. (inst and "PRESENT" or "absent"))
+  end
+
+  local td = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  L("== catalog app.CharacterID (full) ==")
+  if td then
+    local fs = try(function() return td:get_fields() end) or {}
+    local n = 0
+    for _, f in ipairs(fs) do
+      local fn = try(function() return f:get_name() end) or ""
+      local v = try(function() return f:get_data(nil) end)
+      L("  " .. fn .. " = " .. tostring(v))
+      n = n + 1
+    end
+    L("  (" .. n .. " entries)")
+  else
+    L("  TYPE NOT FOUND")
+  end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe2.txt", text) then error("could not write summon_probe2.txt") end
+  return "summon_probe2.txt written: " .. #out .. " lines"
+end
+
+end
+do
+---------------------------------------------------------------- v1.89.8: summon probe step 3
+-- requestGenerate(container, ...) returns nil without an exception
+-- for factory-built and hand-built containers alike, so the real
+-- entry point may be elsewhere in GenerateManager: step 1's keyword
+-- filter saw 120 of its 356 methods. This dumps the FULL method list
+-- plus the shapes of the table/selector route types. Read-only.
+COMMANDS.summon_probe3 = function()
+  local out = {}
+  local function L(x) out[#out + 1] = x end
+  local function sig(m)
+    local pts = try(function() return m:get_param_types() end) or {}
+    local ps = {}
+    for _, t in ipairs(pts) do
+      ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+    end
+    local rt = try(function() return m:get_return_type() end)
+    return "(" .. table.concat(ps, ", ") .. ") -> " ..
+      tostring(rt and try(function() return rt:get_full_name() end) or "?")
+  end
+  local function dump_all_methods(tname)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== ALL methods of " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    for _, m in ipairs(ms) do
+      L("  " .. tostring(try(function() return m:get_name() end) or "?") .. sig(m))
+    end
+    L("  (" .. #ms .. " methods)")
+  end
+  local function dump_type_full(tname, cap)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== type " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local n = 0
+    for _, m in ipairs(ms) do
+      L("  method " .. tostring(try(function() return m:get_name() end) or "?") .. sig(m))
+      n = n + 1
+      if n >= cap then L("  ... (method list capped)") break end
+    end
+    local fs = try(function() return td:get_fields() end) or {}
+    local shown = 0
+    for _, f in ipairs(fs) do
+      local fn = try(function() return f:get_name() end) or ""
+      local ft = try(function() return f:get_type() end)
+      L("  field " .. fn .. " : " ..
+        tostring(ft and try(function() return ft:get_full_name() end) or "?"))
+      shown = shown + 1
+      if shown >= cap then L("  ... (field list capped)") break end
+    end
+    L("  (" .. n .. " methods, " .. shown .. " fields)")
+  end
+
+  L("== summon_probe3 (bridge 1.89.67) ==")
+  dump_all_methods("app.GenerateManager")
+  for _, tname in ipairs({ "app.GenerateSelector", "app.GenerateTableData",
+                           "app.GenerateTableListData", "app.AutoSetGenerateTableData",
+                           "app.GenerateSetting.GenerateSettingContainer",
+                           "app.UniqueID", "app.GeneratorID", "app.RequestID",
+                           "app.GenerateTable" }) do
+    dump_type_full(tname, 250)
+  end
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe3.txt", text) then error("could not write summon_probe3.txt") end
+  return "summon_probe3.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.11: summon probe step 4
+-- Five rounds in, every door refuses the same way (nil / code -1)
+-- while the manager's own checks pass, and the verify retries killed
+-- the async-prefab theory (same -1 seconds later). Stop guessing
+-- what a valid request looks like and DIFF against a real one: dump
+-- our factory container and a real world enemy's container (built
+-- back from its save-data request) through the same reflective
+-- dumper, fire the force call at the REAL container as a control,
+-- and dump the catalog/default-parameter types that might fill the
+-- gap. (Building our container registers it, exactly like a summon
+-- attempt; nothing here spawns from our container.)
+COMMANDS.summon_probe4 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function typename(o)
+    local td = try(function() return o:get_type_definition() end)
+    return td and tostring(try(function() return td:get_full_name() end)) or "?"
+  end
+  local function dump_obj(label, o, depth)
+    if not o then L(label .. " = nil") return end
+    L(label .. " : " .. typename(o))
+    if depth >= 2 then return end
+    local td = try(function() return o:get_type_definition() end)
+    if not td then return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local shown = 0
+    for _, m in ipairs(ms) do
+      local mn = try(function() return m:get_name() end) or ""
+      if mn:sub(1, 4) == "get_" then
+        local pts = try(function() return m:get_param_types() end) or {}
+        if #pts == 0 then
+          local v = try(function() return o:call(mn) end)
+          if v == nil then
+            L("  " .. mn .. " = nil")
+          elseif type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+            L("  " .. mn .. " = " .. tostring(v))
+          else
+            L("  " .. mn .. " = <" .. typename(v) .. "> " .. tostring(v))
+            if depth == 0 and mn:find("Info") then
+              dump_obj("  [" .. mn .. "]", v, depth + 1)
+            end
+          end
+          shown = shown + 1
+          if shown >= 120 then L("  ... (getters capped)") break end
+        end
+      end
+    end
+  end
+  local function dump_enum(tname)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== enum " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local fs = try(function() return td:get_fields() end) or {}
+    for _, f in ipairs(fs) do
+      if try(function() return f:is_static() end) then
+        L("  " .. tostring(try(function() return f:get_name() end) or "?") ..
+          " = " .. tostring(try(function() return f:get_data(nil) end)))
+      end
+    end
+  end
+  local function dump_type(tname)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== type " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local n = 0
+    for _, m in ipairs(ms) do
+      local pts = try(function() return m:get_param_types() end) or {}
+      local ps = {}
+      for _, t in ipairs(pts) do
+        ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+      end
+      local rt = try(function() return m:get_return_type() end)
+      L("  method " .. tostring(try(function() return m:get_name() end) or "?") ..
+        "(" .. table.concat(ps, ", ") .. ") -> " ..
+        tostring(rt and try(function() return rt:get_full_name() end) or "?"))
+      n = n + 1
+      if n >= 200 then L("  ... (methods capped)") break end
+    end
+    local fs = try(function() return td:get_fields() end) or {}
+    local shown = 0
+    for _, f in ipairs(fs) do
+      local ft = try(function() return f:get_type() end)
+      L("  field " .. tostring(try(function() return f:get_name() end) or "?") ..
+        " : " .. tostring(ft and try(function() return ft:get_full_name() end) or "?"))
+      shown = shown + 1
+      if shown >= 80 then L("  ... (fields capped)") break end
+    end
+  end
+
+  L("== summon_probe4 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("GenerateManager or CharacterManager missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe4.txt", table.concat(out, "\n")) then error("could not write summon_probe4.txt") end
+    return "summon_probe4: managers missing"
+  end
+  dump_enum("app.LoadAreaEnum")
+
+  -- Resolve ch255000 and the player transform exactly like summon_boss.
+  local chara = nil
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+  for _, f in ipairs(cfs) do
+    if try(function() return f:is_static() end) and
+       try(function() return f:get_name() end) == "ch255000" then
+      chara = try(function() return f:get_data(nil) end)
+    end
+  end
+  L("ch255000 resolved: " .. tostring(chara))
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+  local genID = try(function() return gm:call("getPoolGeneratorID") end)
+  local uniqID = chara and try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+  local cont = nil
+  if chara and ppos and quat and scale and genID and uniqID then
+    cont = try(function()
+      return gm:call("getPoolGenerateInfoContainerForCharacter",
+        genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+    end)
+  end
+  dump_obj("OUR container (ch255000, factory)", cont, 0)
+  L("defaults: scaleForMonster=" ..
+    tostring(try(function() return gm:call("getDefaultScaleForMonster", chara, false) end)) ..
+    " initSetting present=" ..
+    tostring(try(function() return gm:call("getInitSetting", chara, 1) end) ~= nil) ..
+    " appearPriority(100)=" ..
+    tostring(try(function() return gm:call("getDefaultAppearPriority", 100, 3, chara) end)))
+
+  -- A real world enemy's request, converted back into a container.
+  local reqs = try(function() return gm:call("getEnemyRequests", 3, false, false) end)
+    or try(function() return gm:call("getEnemyRequests", 3, true, true) end)
+  local cnt = reqs and try(function() return reqs:call("get_Count") end)
+  L("enemy requests count = " .. tostring(cnt))
+  if reqs and cnt and cnt > 0 then
+    local first = try(function() return reqs:call("get_Item", 0) end)
+    dump_obj("REAL request save data [0]", first, 0)
+    local rc = first and try(function() return gm:call("convRequestSaveDataToContainer", first) end)
+    dump_obj("REAL container (converted)", rc, 0)
+    if rc then
+      local code = try(function()
+        return gm:call("forceRequestCreateInstance", rc, function() end, function() end)
+      end)
+      L("forceRequestCreateInstance(REAL container) = " .. tostring(code))
+    end
+  end
+
+  local cc = try(function() return gm:call("get_CatalogCtrl") end)
+  dump_obj("CatalogCtrl instance", cc, 0)
+  dump_type("app.GenerateCatalogController")
+  dump_type("app.GenerateDefaultParameter")
+  dump_type("via.PrefabController")
+  dump_type("app.PrefabController")
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe4.txt", text) then error("could not write summon_probe4.txt") end
+  return "summon_probe4.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.12: summon probe step 5
+-- Probe 4's findings: getEnemyRequests returned ZERO (it lists saved
+-- repop requests, not live enemies - so no real-container diff from
+-- that route), our factory container is fully populated, and the
+-- missing piece is likely the PREFAB: GenerateCatalogController
+-- holds an enemy catalog (CharacterID -> PrefabController) that only
+-- contains what the loaded areas registered. force/safe returning -1
+-- fits "character not in the enemy catalog / prefab not ready".
+-- This probe asks the catalog directly, per code: is there a prefab
+-- controller, is it ready, does our container read as ready - and it
+-- fires the force call at the first catalog-ready code as a control.
+-- It also pulls one live reserve controller (the ~195 the manager
+-- reported) and dumps it for the container diff probe 4 wanted.
+COMMANDS.summon_probe5 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function typename(o)
+    local td = try(function() return o:get_type_definition() end)
+    return td and tostring(try(function() return td:get_full_name() end)) or "?"
+  end
+  local function dump_obj(label, o, depth)
+    if not o then L(label .. " = nil") return end
+    L(label .. " : " .. typename(o))
+    if depth >= 2 then return end
+    local td = try(function() return o:get_type_definition() end)
+    if not td then return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local shown = 0
+    for _, m in ipairs(ms) do
+      local mn = try(function() return m:get_name() end) or ""
+      if mn:sub(1, 4) == "get_" then
+        local pts = try(function() return m:get_param_types() end) or {}
+        if #pts == 0 then
+          local v = try(function() return o:call(mn) end)
+          if v == nil then
+            L("  " .. mn .. " = nil")
+          elseif type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+            L("  " .. mn .. " = " .. tostring(v))
+          else
+            L("  " .. mn .. " = <" .. typename(v) .. "> " .. tostring(v))
+            if depth == 0 and (mn:find("Info") or mn:find("Container")) then
+              dump_obj("  [" .. mn .. "]", v, depth + 1)
+            end
+          end
+          shown = shown + 1
+          if shown >= 120 then L("  ... (getters capped)") break end
+        end
+      end
+    end
+  end
+  local function new_pc()
+    local td = try(function() return sdk.find_type_definition("app.PrefabController") end)
+    if not td then return nil end
+    local o = try(function() return td:create_instance() end)
+    if o then try(function() o:call(".ctor") end) end
+    return o
+  end
+
+  L("== summon_probe5 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("GenerateManager or CharacterManager missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe5.txt", table.concat(out, "\n")) then error("could not write summon_probe5.txt") end
+    return "summon_probe5: managers missing"
+  end
+  local cc = try(function() return gm:call("get_CatalogCtrl") end)
+  L("CatalogCtrl: " .. tostring(cc))
+  if not cc then
+    if not wr(DIR .. "summon_probe5.txt", table.concat(out, "\n")) then error("could not write summon_probe5.txt") end
+    return "summon_probe5: no catalog controller"
+  end
+
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+  local function resolve(code)
+    for _, f in ipairs(cfs) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == code then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+
+  local codes = { "ch255000", "ch252000", "ch258002", "ch230004", "ch240000" }
+  local control_done = false
+  for _, code in ipairs(codes) do
+    local chara = resolve(code)
+    L("-- " .. code .. " resolved: " .. tostring(chara))
+    if chara then
+      local pc = new_pc()
+      local found = pc and try(function()
+        return cc:call("getCharacterPrefabController", 3, chara, pc)
+      end)
+      if found then
+        L("   catalog: FOUND ready=" ..
+          tostring(try(function() return pc:call("get_Ready") end)) ..
+          " refCount=" .. tostring(try(function() return pc:call("get_RefCount") end)) ..
+          " hasRef=" .. tostring(try(function() return pc:call("get_HasReference") end)) ..
+          " path=" .. tostring(try(function() return pc:call("get_ResourcePath") end)))
+      else
+        L("   catalog: NOT FOUND (no prefab controller for this code here)")
+      end
+      local genID = try(function() return gm:call("getPoolGeneratorID") end)
+      local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+      local cont = nil
+      if ppos and quat and scale and genID and uniqID then
+        cont = try(function()
+          return gm:call("getPoolGenerateInfoContainerForCharacter",
+            genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+        end)
+      end
+      if cont then
+        L("   container isReadyPrefab=" ..
+          tostring(try(function() return cc:call("isReadyPrefab", cont) end)) ..
+          " isHasReferencePrefab=" ..
+          tostring(try(function() return cc:call("isHasReferencePrefab", cont) end)))
+        local ci = try(function() return cont:call("get_CommonInfo") end)
+        local sb = ci and try(function() return cc:call("requestStandbyPrefab", ci) end)
+        L("   catalog requestStandbyPrefab(CommonInfo) = " .. tostring(sb) ..
+          " ; isReadyPrefab now=" ..
+          tostring(try(function() return cc:call("isReadyPrefab", cont) end)))
+        if code == "ch255000" then
+          SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq = cont, code, chara, uniqID
+          SUMMON.ctrl = nil
+          L("   (ch255000 container staged - Verify re-reads catalog readiness)")
+        end
+        if found and not control_done and
+           try(function() return pc:call("get_Ready") end) == true then
+          local code2 = try(function()
+            return gm:call("forceRequestCreateInstance", cont, function() end, function() end)
+          end)
+          L("   CONTROL force on catalog-ready " .. code .. " = " .. tostring(code2))
+          control_done = true
+        end
+      else
+        L("   container build failed")
+      end
+    end
+  end
+  L("control force attempted: " .. tostring(control_done))
+
+  -- One live reserve controller, for the container diff.
+  local res = try(function() return gm:call("getReserveRequests", 3, false, false) end)
+    or try(function() return gm:call("getReserveRequests", 3, true, true) end)
+  L("reserve dictionary: " .. tostring(res))
+  if res then
+    local lst = try(function() return res:call("get_Item", 0) end)
+    L("reserve list for layer Normal(0): " .. tostring(lst))
+    if lst then
+      local n = try(function() return lst:call("get_Count") end)
+      L("reserve controllers (Normal): " .. tostring(n))
+      if n and n > 0 then
+        local c0 = try(function() return lst:call("get_Item", 0) end)
+        dump_obj("RESERVE controller [0]", c0, 0)
+      end
+    end
+  end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe5.txt", text) then error("could not write summon_probe5.txt") end
+  return "summon_probe5.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.13: summon probe step 6
+-- Probe 5 fallout: getCharacterPrefabController filled nothing for
+-- any code (its PrefabController parameter is likely an out/ref the
+-- Lua bridge cannot service), yet isReadyPrefab reads TRUE for a
+-- standby-warmed container - so prefabs are reachable, just not
+-- through that signature. This probe dumps the enemy catalog's own
+-- type (via the _EnemyCatalog field's type definition) to find a
+-- callable accessor, tries its indexer for ch255000, and dumps
+-- app.GenerateController in full (the reserve route's setup()
+-- signature matters for round 6). Read-only.
+COMMANDS.summon_probe6 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function sig(m)
+    local pts = try(function() return m:get_param_types() end) or {}
+    local ps = {}
+    for _, t in ipairs(pts) do
+      ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+    end
+    local rt = try(function() return m:get_return_type() end)
+    return "(" .. table.concat(ps, ", ") .. ") -> " ..
+      tostring(rt and try(function() return rt:get_full_name() end) or "?")
+  end
+  local function dump_type_td(td, label)
+    L("== type " .. label .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    for _, m in ipairs(ms) do
+      L("  method " .. tostring(try(function() return m:get_name() end) or "?") .. sig(m))
+    end
+    local fs = try(function() return td:get_fields() end) or {}
+    for _, f in ipairs(fs) do
+      local ft = try(function() return f:get_type() end)
+      L("  field " .. tostring(try(function() return f:get_name() end) or "?") ..
+        " : " .. tostring(ft and try(function() return ft:get_full_name() end) or "?"))
+    end
+    L("  (" .. #ms .. " methods, " .. #fs .. " fields)")
+  end
+  local function dump_type(tname)
+    dump_type_td(try(function() return sdk.find_type_definition(tname) end), tname)
+  end
+
+  L("== summon_probe6 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  if not cc then
+    L("no catalog controller - not loaded into the world?")
+    if not wr(DIR .. "summon_probe6.txt", table.concat(out, "\n")) then error("could not write summon_probe6.txt") end
+    return "summon_probe6: no catalog controller"
+  end
+  local ec = try(function() return cc:get_field("_EnemyCatalog") end)
+  L("_EnemyCatalog field value: " .. tostring(ec))
+  if ec then
+    local etd = try(function() return ec:get_type_definition() end)
+    dump_type_td(etd, "_EnemyCatalog (runtime type)")
+    -- Resolve ch255000 and try the catalog's indexer-style accessors.
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+    local chara = nil
+    for _, f in ipairs(cfs) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000" then
+        chara = try(function() return f:get_data(nil) end)
+      end
+    end
+    L("ch255000 resolved: " .. tostring(chara))
+    if chara then
+      for _, mname in ipairs({ "get_Item", "getValue", "get", "find" }) do
+        local v = try(function() return ec:call(mname, chara) end)
+        L("  catalog " .. mname .. "(ch255000) = " .. tostring(v))
+        if v then
+          L("    -> ready=" ..
+            tostring(try(function() return v:call("get_Ready") end)) ..
+            " refCount=" .. tostring(try(function() return v:call("get_RefCount") end)) ..
+            " path=" .. tostring(try(function() return v:call("get_ResourcePath") end)))
+        end
+      end
+    end
+  end
+  dump_type("app.GenerateController")
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe6.txt", text) then error("could not write summon_probe6.txt") end
+  return "summon_probe6.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.14: summon probe step 7
+-- Round 6's manual reserve route (setup + registGenerateController)
+-- queued our controller - then CRASHED the game. The distributor
+-- expects manager-side bookkeeping our manual registration skipped.
+-- New lead: a GeneratorID carries a TableID (Guid) + ExtraID, and a
+-- pooled ID's TableID is probably empty - which would explain why
+-- every door refuses a table-less request while all other checks
+-- pass. This probe reads our IDs, dumps the enemy catalog's type
+-- (carried over from step 6), and scans the global generate tables
+-- for one whose set data contains ch255000. Read-only.
+COMMANDS.summon_probe7 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function typename(o)
+    local td = try(function() return o:get_type_definition() end)
+    return td and tostring(try(function() return td:get_full_name() end)) or "?"
+  end
+  local function dump_obj(label, o, depth)
+    if not o then L(label .. " = nil") return end
+    L(label .. " : " .. typename(o))
+    if depth >= 2 then return end
+    local td = try(function() return o:get_type_definition() end)
+    if not td then return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local shown = 0
+    for _, m in ipairs(ms) do
+      local mn = try(function() return m:get_name() end) or ""
+      if mn:sub(1, 4) == "get_" then
+        local pts = try(function() return m:get_param_types() end) or {}
+        if #pts == 0 then
+          local v = try(function() return o:call(mn) end)
+          if v == nil then
+            L("  " .. mn .. " = nil")
+          elseif type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+            L("  " .. mn .. " = " .. tostring(v))
+          else
+            L("  " .. mn .. " = <" .. typename(v) .. "> " .. tostring(v))
+            if depth == 0 and (mn:find("Info") or mn:find("Container")) then
+              dump_obj("  [" .. mn .. "]", v, depth + 1)
+            end
+          end
+          shown = shown + 1
+          if shown >= 120 then L("  ... (getters capped)") break end
+        end
+      end
+    end
+  end
+  local function sig(m)
+    local pts = try(function() return m:get_param_types() end) or {}
+    local ps = {}
+    for _, t in ipairs(pts) do
+      ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+    end
+    local rt = try(function() return m:get_return_type() end)
+    return "(" .. table.concat(ps, ", ") .. ") -> " ..
+      tostring(rt and try(function() return rt:get_full_name() end) or "?")
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+  local TARGET = 1523627639
+
+  L("== summon_probe7 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  if not gm then
+    L("no GenerateManager - not loaded into the world?")
+    if not wr(DIR .. "summon_probe7.txt", table.concat(out, "\n")) then error("could not write summon_probe7.txt") end
+    return "summon_probe7: no GenerateManager"
+  end
+
+  -- Our pooled GeneratorID, dissected.
+  local genID = try(function() return gm:call("getPoolGeneratorID") end)
+  L("pooled GeneratorID: tableID=" ..
+    tostring(genID and try(function() return genID:call("get_TableID") end)) ..
+    " extraID=" .. tostring(genID and try(function() return genID:call("get_ExtraID") end)) ..
+    " isEmpty=" .. tostring(genID and try(function() return genID:call("isEmpty") end)) ..
+    " str=" .. tostring(genID))
+
+  -- Enemy catalog internals (from step 6).
+  local cc = try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  L("_EnemyCatalog: " .. tostring(ec))
+  if ec then
+    local etd = try(function() return ec:get_type_definition() end)
+    if etd then
+      local ms = try(function() return etd:get_methods() end) or {}
+      for _, m in ipairs(ms) do
+        L("  catalog method " ..
+          tostring(try(function() return m:get_name() end) or "?") .. sig(m))
+      end
+    end
+  end
+
+  -- Scan the global generate tables for ch255000.
+  local lists = try(function() return gm:call("get_GlobalTableListDatas") end)
+  local nlists = arr_len(lists)
+  L("global table list datas: " .. tostring(nlists))
+  local scanned, hits = 0, 0
+  local first_dumped = false
+  if lists and nlists then
+    for li = 0, nlists - 1 do
+      local ld = arr_get(lists, li)
+      local tabs = ld and try(function() return ld:call("get_NormalTableList") end)
+      local ntabs = arr_len(tabs)
+      if tabs and ntabs then
+        for ti = 0, ntabs - 1 do
+          if scanned >= 600 then break end
+          local td2 = arr_get(tabs, ti)
+          local tbl = td2 and try(function() return td2:call("get_Table") end)
+          if tbl then
+            scanned = scanned + 1
+            if not first_dumped then
+              first_dumped = true
+              dump_obj("FIRST table", tbl, 0)
+              local ei = try(function() return tbl:call("get_EnemyInfo") end)
+              dump_obj("FIRST table EnemyInfo", ei, 0)
+              local inits0 = try(function() return tbl:call("get_InitSetDatas") end)
+              local n0 = arr_len(inits0)
+              L("FIRST table InitSetDatas: " .. tostring(n0))
+              if inits0 and n0 and n0 > 0 then
+                dump_obj("FIRST InitSetData[0]", arr_get(inits0, 0), 0)
+              end
+            end
+            local inits = try(function() return tbl:call("get_InitSetDatas") end)
+            local nin = arr_len(inits)
+            if inits and nin then
+              for ii = 0, nin - 1 do
+                local isd = arr_get(inits, ii)
+                if isd then
+                  local itd = try(function() return isd:get_type_definition() end)
+                  local ims = itd and try(function() return itd:get_methods() end) or {}
+                  for _, m in ipairs(ims) do
+                    local mn = try(function() return m:get_name() end) or ""
+                    if mn:sub(1, 4) == "get_" then
+                      local pts = try(function() return m:get_param_types() end) or {}
+                      if #pts == 0 then
+                        local v = try(function() return isd:call(mn) end)
+                        if v == TARGET or tostring(v) == tostring(TARGET) then
+                          hits = hits + 1
+                          L("TABLE HIT: listGuid=" ..
+                            tostring(try(function() return ld:call("get_Guid") end)) ..
+                            " tableID=" ..
+                            tostring(try(function() return td2:call("get_TableID") end)) ..
+                            " via " .. mn)
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  L("tables scanned: " .. scanned .. ", hits for ch255000: " .. hits)
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe7.txt", text) then error("could not write summon_probe7.txt") end
+  return "summon_probe7.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.15: summon probe step 8
+-- Probe 7's catalog dump gave DictionaryCatalog real, callable
+-- accessors: ContainsKey, getCount, getKeys, getValues. This dumps
+-- the enemy catalog census - how many prefabs are registered at this
+-- location, whether ch255000 is among them, and the full key list
+-- (the definitive roster of what can spawn here). Read-only.
+COMMANDS.summon_probe8 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+  local TARGET = 1523627639
+
+  L("== summon_probe8 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not ec then
+    L("no enemy catalog - not loaded into the world?")
+    if not wr(DIR .. "summon_probe8.txt", table.concat(out, "\n")) then error("could not write summon_probe8.txt") end
+    return "summon_probe8: no enemy catalog"
+  end
+  L("player catalog count = " ..
+    tostring(try(function() return cc:call("getPlayerCatalogCount") end)))
+  L("enemy catalog count = " ..
+    tostring(try(function() return ec:call("getCount") end)))
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+  local chara = nil
+  for _, f in ipairs(cfs) do
+    if try(function() return f:is_static() end) and
+       try(function() return f:get_name() end) == "ch255000" then
+      chara = try(function() return f:get_data(nil) end)
+    end
+  end
+  L("ContainsKey(ch255000) = " ..
+    tostring(chara and try(function() return ec:call("ContainsKey", chara) end)))
+  local keys = try(function() return ec:call("getKeys") end)
+  local n = arr_len(keys)
+  L("enemy catalog keys: " .. tostring(n))
+  local present = false
+  if keys and n then
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      if k == TARGET or tostring(k):find(tostring(TARGET), 1, true) then
+        present = true
+        L("  key[" .. i .. "] = " .. tostring(k) .. "  <-- ch255000")
+      else
+        L("  key[" .. i .. "] = " .. tostring(k))
+      end
+    end
+  end
+  L("ch255000 in enemy catalog here: " .. tostring(present))
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe8.txt", text) then error("could not write summon_probe8.txt") end
+  return "summon_probe8.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.17: summon probe step 9
+-- Round 8 falsified standby-warming for catalog-ABSENT prefabs:
+-- isReadyPrefab never flipped across minutes of standby re-requests
+-- for ch255000 (ContainsKey=false at this location). New question:
+-- is ch255000 the exception or the rule? This maps catalog presence
+-- for ALL 22 dropdown codes here, samples registered prefabs'
+-- resource paths (pattern intel), and fires the force call at the
+-- first present-and-ready code as a control - if that lands, the
+-- pipeline works wherever the game has the prefab registered.
+COMMANDS.summon_probe9 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  L("== summon_probe9 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe9.txt", table.concat(out, "\n")) then error("could not write summon_probe9.txt") end
+    return "summon_probe9: managers missing"
+  end
+  L("enemy catalog count = " ..
+    tostring(try(function() return ec:call("getCount") end)))
+
+  -- Sample registered prefab paths.
+  local vals = try(function() return ec:call("getValues") end)
+  local nv = arr_len(vals)
+  L("catalog values: " .. tostring(nv))
+  if vals and nv then
+    for i = 0, math.min(nv, 8) - 1 do
+      local pc = arr_get(vals, i)
+      L("  prefab[" .. i .. "] ready=" ..
+        tostring(pc and try(function() return pc:call("get_Ready") end)) ..
+        " path=" .. tostring(pc and try(function() return pc:call("get_ResourcePath") end)))
+    end
+  end
+
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+  local function resolve(code)
+    for _, f in ipairs(cfs) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == code then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+
+  local codes = { "ch240000", "ch250000", "ch251000", "ch252000",
+                  "ch253000", "ch254000", "ch255000", "ch256000",
+                  "ch256001", "ch257000", "ch257001", "ch257003",
+                  "ch258000", "ch258001", "ch258002", "ch259000",
+                  "ch260000", "ch260001", "ch261000", "ch261001",
+                  "ch230004", "ch231000" }
+  local present_count = 0
+  local control_done = false
+  for _, code in ipairs(codes) do
+    local chara = resolve(code)
+    local present = chara and try(function() return ec:call("ContainsKey", chara) end)
+    if present then present_count = present_count + 1 end
+    L(code .. ": catalog present=" .. tostring(present))
+    if present and not control_done and ppos and quat and scale then
+      local shell = try(function() return gm:call("getPoolGeneratorID") end)
+      local genID = shell and try(function() return shell:call("makeNewGeneratorID") end)
+      local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+      local cont = nil
+      if genID and uniqID then
+        cont = try(function()
+          return gm:call("getPoolGenerateInfoContainerForCharacter",
+            genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+        end)
+      end
+      if cont then
+        pcall(function() gm:call("requestStandbyPrefab", cont) end)
+        local ready = try(function() return cc:call("isReadyPrefab", cont) end)
+        L("   control container ready=" .. tostring(ready))
+        SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq = cont, code, chara, uniqID
+        SUMMON.ctrl = nil
+        if ready == true then
+          local fc = try(function()
+            return gm:call("forceRequestCreateInstance", cont, function() end, function() end)
+          end)
+          L("   CONTROL force on present+ready " .. code .. " = " .. tostring(fc))
+          control_done = true
+        else
+          L("   (staged - Verify will re-read readiness and fire when ready)")
+          control_done = true
+        end
+      end
+    end
+  end
+  L("dropdown codes present in catalog here: " .. present_count .. " / " .. #codes)
+  L("control attempted: " .. tostring(control_done))
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe9.txt", text) then error("could not write summon_probe9.txt") end
+  return "summon_probe9.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.18: summon probe step 10
+-- Probe 9: NONE of the 22 boss-tier dropdown codes is in this
+-- location's enemy catalog (0/22) - the catalog holds the common
+-- field families the loaded contents use (samples all read
+-- AppSystem/ch/ch220/Prefab/ch220000_00.pfb, ready=true). Every
+-- summon test so far aimed at an absent prefab. Control time: run
+-- the full pipeline at a code that is PRESENT (ch220000 family) -
+-- if it spawns, the pipeline is proven and boss codes are purely
+-- catalog-gated. Also recon for the self-register route: dump
+-- via.Prefab and resource-manager type candidates to find a load
+-- API for paths like the sampled pattern.
+COMMANDS.summon_probe10 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function sig(m)
+    local pts = try(function() return m:get_param_types() end) or {}
+    local ps = {}
+    for _, t in ipairs(pts) do
+      ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+    end
+    local rt = try(function() return m:get_return_type() end)
+    return "(" .. table.concat(ps, ", ") .. ") -> " ..
+      tostring(rt and try(function() return rt:get_full_name() end) or "?")
+  end
+  local function dump_type(tname, cap)
+    local td = try(function() return sdk.find_type_definition(tname) end)
+    L("== type " .. tname .. " ==")
+    if not td then L("  TYPE NOT FOUND") return end
+    local ms = try(function() return td:get_methods() end) or {}
+    local n = 0
+    for _, m in ipairs(ms) do
+      L("  method " .. tostring(try(function() return m:get_name() end) or "?") .. sig(m))
+      n = n + 1
+      if n >= cap then L("  ... (methods capped)") break end
+    end
+    local fs = try(function() return td:get_fields() end) or {}
+    local shown = 0
+    for _, f in ipairs(fs) do
+      local ft = try(function() return f:get_type() end)
+      L("  field " .. tostring(try(function() return f:get_name() end) or "?") ..
+        " : " .. tostring(ft and try(function() return ft:get_full_name() end) or "?"))
+      shown = shown + 1
+      if shown >= 60 then L("  ... (fields capped)") break end
+    end
+  end
+
+  L("== summon_probe10 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe10.txt", table.concat(out, "\n")) then error("could not write summon_probe10.txt") end
+    return "summon_probe10: managers missing"
+  end
+
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+  local function resolve(code)
+    for _, f in ipairs(cfs) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == code then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+
+  local control_done = false
+  for _, code in ipairs({ "ch220000", "ch221000", "ch222000" }) do
+    local chara = resolve(code)
+    local present = chara and try(function() return ec:call("ContainsKey", chara) end)
+    L(code .. ": catalog present=" .. tostring(present))
+    if present and not control_done and ppos and quat and scale then
+      local shell = try(function() return gm:call("getPoolGeneratorID") end)
+      local genID = shell and try(function() return shell:call("makeNewGeneratorID") end)
+      local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+      local cont = nil
+      if genID and uniqID then
+        cont = try(function()
+          return gm:call("getPoolGenerateInfoContainerForCharacter",
+            genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+        end)
+      end
+      if cont then
+        pcall(function() gm:call("requestStandbyPrefab", cont) end)
+        local ready = try(function() return cc:call("isReadyPrefab", cont) end)
+        L("   control container ready=" .. tostring(ready))
+        SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq = cont, code, chara, uniqID
+        SUMMON.ctrl = nil
+        if ready == true then
+          local fc = try(function()
+            return gm:call("forceRequestCreateInstance", cont, function() end, function() end)
+          end)
+          L("   CONTROL force on present+ready " .. code .. " = " .. tostring(fc))
+          if not (type(fc) == "number" and fc >= 0) then
+            local sc = try(function()
+              return gm:call("safeRequestCreateInstance", cont, function() end, function() end)
+            end)
+            L("   CONTROL safe on present+ready " .. code .. " = " .. tostring(sc))
+            local gc = try(function()
+              return gm:call("requestGenerate", cont, 8 + 35184372088832, false, false,
+                function() end, function() end)
+            end)
+            L("   CONTROL requestGenerate on present+ready " .. code .. " = " ..
+              tostring(gc) .. (gc and " (controller!)" or ""))
+            if gc then SUMMON.ctrl = gc end
+          end
+        else
+          L("   (staged - Verify re-reads readiness and fires when ready)")
+        end
+        control_done = true
+      end
+    end
+  end
+  L("control attempted: " .. tostring(control_done))
+
+  dump_type("via.Prefab", 120)
+  dump_type("via.ResourceManager", 120)
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe10.txt", text) then error("could not write summon_probe10.txt") end
+  return "summon_probe10.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.19: summon probe step 11
+-- Probe 10 shock: even ch220000 reads catalog present=FALSE while
+-- the catalog demonstrably holds ch220000_00's prefab (probe 9 path
+-- samples). New theory: the catalog keys are the VARIANT codes
+-- (ch220000_00) - the CharacterID enum's 1707 fields are mostly
+-- variant-suffixed, and every presence test so far used bare base
+-- codes. This probe reads the keys' own names (ToString), tests
+-- ContainsKey on variant codes, fires the control on the first
+-- confirmed key, and recons the register route (PrefabController
+-- fields for the wrapped via.Prefab; ResourceManager load methods).
+COMMANDS.summon_probe11 = function()
+  local out = {}
+  local function L(x)
+    if #out < 1600 then out[#out + 1] = x end
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  L("== summon_probe11 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe11.txt", table.concat(out, "\n")) then error("could not write summon_probe11.txt") end
+    return "summon_probe11: managers missing"
+  end
+
+  -- 1) Key census: what do the catalog keys call themselves?
+  local keys = try(function() return ec:call("getKeys") end)
+  local nk = arr_len(keys)
+  L("catalog keys: " .. tostring(nk))
+  if keys and nk then
+    for i = 0, math.min(nk, 40) - 1 do
+      local k = arr_get(keys, i)
+      L("  key[" .. i .. "] tostring=" ..
+        tostring(k and try(function() return k:call("ToString") end)))
+    end
+  end
+
+  -- 2) Variant-code presence tests.
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfs = ctd and try(function() return ctd:get_fields() end) or {}
+  local byname = {}
+  for _, f in ipairs(cfs) do
+    if try(function() return f:is_static() end) then
+      local nm = try(function() return f:get_name() end)
+      if nm then byname[nm] = try(function() return f:get_data(nil) end) end
+    end
+  end
+  local function present(code)
+    local v = byname[code]
+    if v == nil then return "no-enum-field" end
+    return tostring(try(function() return ec:call("ContainsKey", v) end))
+  end
+  for _, code in ipairs({ "ch220000_00", "ch220000", "ch255000_00", "ch255000",
+                          "ch258000_00", "ch258002", "ch240000_00", "ch240000" }) do
+    L(code .. ": enum=" .. tostring(byname[code] ~= nil) ..
+      " catalog present=" .. present(code))
+  end
+
+  -- 3) Control: first confirmed-present variant gets the full ladder.
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+  local control_done = false
+  for _, code in ipairs({ "ch220000_00", "ch220000", "ch221000_00" }) do
+    local chara = byname[code]
+    local ispres = chara and try(function() return ec:call("ContainsKey", chara) end)
+    if ispres and not control_done and ppos and quat and scale then
+      local shell = try(function() return gm:call("getPoolGeneratorID") end)
+      local genID = shell and try(function() return shell:call("makeNewGeneratorID") end)
+      local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+      local cont = nil
+      if genID and uniqID then
+        cont = try(function()
+          return gm:call("getPoolGenerateInfoContainerForCharacter",
+            genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+        end)
+      end
+      if cont then
+        pcall(function() gm:call("requestStandbyPrefab", cont) end)
+        local ready = try(function() return cc:call("isReadyPrefab", cont) end)
+        L("CONTROL " .. code .. ": container ready=" .. tostring(ready))
+        SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq = cont, code, chara, uniqID
+        SUMMON.ctrl = nil
+        if ready == true then
+          local fc = try(function()
+            return gm:call("forceRequestCreateInstance", cont, function() end, function() end)
+          end)
+          L("  CONTROL force = " .. tostring(fc))
+          if not (type(fc) == "number" and fc >= 0) then
+            local sc = try(function()
+              return gm:call("safeRequestCreateInstance", cont, function() end, function() end)
+            end)
+            L("  CONTROL safe = " .. tostring(sc))
+            local gc = try(function()
+              return gm:call("requestGenerate", cont, 8 + 35184372088832, false, false,
+                function() end, function() end)
+            end)
+            L("  CONTROL requestGenerate = " .. tostring(gc) ..
+              (gc and " (controller!)" or ""))
+            if gc then SUMMON.ctrl = gc end
+          end
+        else
+          L("  (staged - Verify re-reads readiness and fires when ready)")
+        end
+        control_done = true
+      end
+    end
+  end
+  L("control attempted: " .. tostring(control_done))
+
+  -- 4) PrefabController fields: where does the via.Prefab live?
+  local pcd = try(function() return sdk.find_type_definition("app.PrefabController") end)
+  L("== app.PrefabController fields ==")
+  if pcd then
+    for _, f in ipairs(try(function() return pcd:get_fields() end) or {}) do
+      local ft = try(function() return f:get_type() end)
+      L("  field " .. tostring(try(function() return f:get_name() end) or "?") ..
+        " : " .. tostring(ft and try(function() return ft:get_full_name() end) or "?"))
+    end
+  else L("  TYPE NOT FOUND") end
+
+  -- 5) ResourceManager: load-flavored methods only.
+  local rmd = try(function() return sdk.find_type_definition("via.ResourceManager") end)
+  L("== via.ResourceManager load-ish methods ==")
+  if rmd then
+    local function sig(m)
+      local pts = try(function() return m:get_param_types() end) or {}
+      local ps = {}
+      for _, t in ipairs(pts) do
+        ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+      end
+      local rt = try(function() return m:get_return_type() end)
+      return "(" .. table.concat(ps, ", ") .. ") -> " ..
+        tostring(rt and try(function() return rt:get_full_name() end) or "?")
+    end
+    for _, m in ipairs(try(function() return rmd:get_methods() end) or {}) do
+      local nm = tostring(try(function() return m:get_name() end) or "")
+      local low = nm:lower()
+      if low:find("load") or low:find("create") or low:find("find") or
+         low:find("request") or low:find("resource") then
+        L("  method " .. nm .. sig(m))
+      end
+    end
+  else L("  TYPE NOT FOUND") end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe11.txt", text) then error("could not write summon_probe11.txt") end
+  return "summon_probe11.txt written: " .. #out .. " lines"
+end
+
+
+
+end
+do
+---------------------------------------------------------------- v1.89.22: summon probe step 13
+-- Step 12 bundled two untested operations (a manager-internals
+-- census and the never-fired requestCreateInstance door) and the
+-- game crashed; from here: ONE new door per probe. This one is the
+-- via.Prefab direct instantiate - the standard REFramework spawn
+-- primitive, no GenerateManager enrollment involved: find
+-- ch255000_00's PrefabController by resource path (read-only, the
+-- probe-9 pattern), take its wrapped prefab (field _Item), and if
+-- it reports Ready, instantiate it at the summon spot. A raw
+-- instance is a scene object - it writes nothing to save data.
+COMMANDS.summon_probe13 = function()
+  local out = {}
+  local function L(x)
+    if #out < 200 then out[#out + 1] = x end
+  end
+  L("== summon_probe13 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe13.txt", table.concat(out, "\n")) then error("could not write summon_probe13.txt") end
+    return "summon_probe13: managers missing"
+  end
+
+  -- Find the PrefabController whose resource path names ch255000.
+  local target_pc, target_path = nil, nil
+  local vals = try(function() return ec:call("getValues") end)
+  local nv = vals and (try(function() return vals:call("get_Count") end)
+    or try(function() return vals:call("get_Length") end))
+  L("catalog values: " .. tostring(nv))
+  if vals and nv then
+    for i = 0, nv - 1 do
+      local pc = try(function() return vals:call("get_Item", i) end)
+        or try(function() return vals:call("GetValue", i) end)
+      local rp = pc and try(function() return pc:call("get_ResourcePath") end)
+      if rp and tostring(rp):find("ch255000") then
+        target_pc, target_path = pc, tostring(rp)
+        break
+      end
+    end
+  end
+  L("prefab controller: " .. tostring(target_pc) .. " path=" .. tostring(target_path))
+  if not target_pc then
+    L("no ch255000 controller in this catalog - boss not registered here")
+    if not wr(DIR .. "summon_probe13.txt", table.concat(out, "\n")) then error("could not write summon_probe13.txt") end
+    return "summon_probe13: ch255000 not in catalog here"
+  end
+  L("controller ready=" ..
+    tostring(try(function() return target_pc:call("get_Ready") end)) ..
+    " hasRef=" ..
+    tostring(try(function() return target_pc:call("get_HasReference") end)))
+
+  local prefab = try(function() return target_pc:get_field("_Item") end)
+  L("prefab (_Item): " .. tostring(prefab))
+  if not prefab then
+    if not wr(DIR .. "summon_probe13.txt", table.concat(out, "\n")) then error("could not write summon_probe13.txt") end
+    return "summon_probe13: no prefab in controller"
+  end
+  local pready = try(function() return prefab:call("get_Ready") end)
+  L("prefab ready=" .. tostring(pready) ..
+    " valid=" .. tostring(try(function() return prefab:call("get_Valid") end)) ..
+    " exist=" .. tostring(try(function() return prefab:call("get_Exist") end)) ..
+    " standby=" .. tostring(try(function() return prefab:call("get_Standby") end)))
+
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local pos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  if not pos or not quat then
+    L("player transform unavailable")
+    if not wr(DIR .. "summon_probe13.txt", table.concat(out, "\n")) then error("could not write summon_probe13.txt") end
+    return "summon_probe13: no player transform"
+  end
+  local fx, fz = 0.7071, 0.7071
+  local front = try(function() return cm:call("get_CameraFront") end)
+  if front and type(front.x) == "number" and type(front.z) == "number" then
+    local len = math.sqrt(front.x * front.x + front.z * front.z)
+    if len > 0.01 then fx, fz = front.x / len, front.z / len end
+  end
+  local spos = try(function() return Vector3f.new(pos.x + fx * 5.0, pos.y, pos.z + fz * 5.0) end)
+  L("spawn pos: " .. tostring(spos and spos.x) .. ", " ..
+    tostring(spos and spos.y) .. ", " .. tostring(spos and spos.z))
+
+  if pready == true and spos then
+    local go = try(function() return prefab:call("instantiate", spos, quat) end)
+    L("instantiate(pos, quat) -> " .. tostring(go))
+    if go then
+      L("INSTANTIATED - look at the spawn spot")
+    else
+      L("instantiate returned nil (no exception captured)")
+    end
+  elseif spos then
+    L("prefab not ready - setting standby and NOT instantiating this run")
+    pcall(function() prefab:call("set_Standby", true) end)
+    L("standby set; run probe step 13 again in a few seconds")
+  end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe13.txt", text) then error("could not write summon_probe13.txt") end
+  return "summon_probe13.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.23: summon probe step 14
+-- READ-ONLY. The summon code in 1.89.22 is byte-identical to
+-- 1.89.20 (diffed against the CT v1.25 bundle), yet summon now
+-- crashes - so the variable is catalog state, not code. Step 13
+-- also found its path-matched controller was the ch255000_01 file
+-- with an INVALID prefab (valid=false). This probe maps the ch255
+-- (and ch240) family properly: catalog keys and values enumerated
+-- in step, each key's controller + wrapped prefab state, plus a
+-- factory container's readiness read. No standby calls, no
+-- instantiate, no generate calls - reads only.
+COMMANDS.summon_probe14 = function()
+  local out = {}
+  local function L(x)
+    if #out < 300 then out[#out + 1] = x end
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  L("== summon_probe14 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe14.txt", table.concat(out, "\n")) then error("could not write summon_probe14.txt") end
+    return "summon_probe14: managers missing"
+  end
+
+  local keys = try(function() return ec:call("getKeys") end)
+  local vals = try(function() return ec:call("getValues") end)
+  local nk = arr_len(keys)
+  local nv = arr_len(vals)
+  L("catalog keys=" .. tostring(nk) .. " values=" .. tostring(nv))
+  if keys and vals and nk and nv then
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm and (tostring(nm):find("ch255") or tostring(nm):find("ch240")) then
+        local pc = arr_get(vals, i)
+        local item = pc and try(function() return pc:get_field("_Item") end)
+        L(nm .. ": ctrl path=" ..
+          tostring(pc and try(function() return pc:call("get_ResourcePath") end)) ..
+          " ready=" .. tostring(pc and try(function() return pc:call("get_Ready") end)) ..
+          " hasRef=" .. tostring(pc and try(function() return pc:call("get_HasReference") end)) ..
+          " | prefab path=" ..
+          tostring(item and try(function() return item:call("get_Path") end)) ..
+          " ready=" .. tostring(item and try(function() return item:call("get_Ready") end)) ..
+          " valid=" .. tostring(item and try(function() return item:call("get_Valid") end)))
+      end
+    end
+  end
+
+  -- Container-side readiness for ch255000_00, no standby anywhere.
+  local chara = try(function() return enum_value("app.CharacterID", "ch255000_00") end)
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+  if chara and ppos and quat and scale then
+    local shell = try(function() return gm:call("getPoolGeneratorID") end)
+    local genID = shell and try(function() return shell:call("makeNewGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      cont = try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+      end)
+    end
+    L("fresh container (no standby): isReadyPrefab=" ..
+      tostring(cont and try(function() return cc:call("isReadyPrefab", cont) end)) ..
+      " isHasReferencePrefab=" ..
+      tostring(cont and try(function() return cc:call("isHasReferencePrefab", cont) end)))
+  else
+    L("container build skipped (missing pieces)")
+  end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe14.txt", text) then error("could not write summon_probe14.txt") end
+  return "summon_probe14.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.25: summon probe step 15
+-- Probe 14's map: keys and values ARE aligned, and EVERY ch255
+-- controller here wraps an INVALID prefab (valid=false) - catalog
+-- presence is not resource presence. That explains acceptance
+-- without instances: force issues a request against a prefab that
+-- cannot instantiate in this area. Two questions in one session:
+-- (1) does standby flip the wrapped prefab's validity? (2) the
+-- factory container carries LoadArea=Local(2) with a loaded-
+-- contents check; LoadAreaEnum has LoadedAreaIgnoreContentsLoad-
+-- Check(6) - if a setter exists, does a container set to 6 get
+-- its request fulfilled? One force maximum, fire-once rules.
+COMMANDS.summon_probe15 = function()
+  local out = {}
+  local function L(x)
+    if #out < 400 then out[#out + 1] = x end
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  L("== summon_probe15 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe15.txt", table.concat(out, "\n")) then error("could not write summon_probe15.txt") end
+    return "summon_probe15: managers missing"
+  end
+
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_state(pc)
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item,
+      item and try(function() return item:call("get_Valid") end),
+      item and try(function() return item:call("get_Ready") end)
+  end
+
+  local pc = find_ctrl("ch255000_00")
+  local item, valid0, ready0 = prefab_state(pc)
+  L("ch255000_00 controller=" .. tostring(pc) ..
+    " prefab valid=" .. tostring(valid0) .. " ready=" .. tostring(ready0))
+
+  local chara = try(function() return enum_value("app.CharacterID", "ch255000_00") end)
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  local scale = try(function() return Vector3f.new(1, 1, 1) end)
+  if not (chara and ppos and quat and scale) then
+    L("missing pieces: chara=" .. tostring(chara) .. " pos=" .. tostring(ppos) ..
+      " quat=" .. tostring(quat) .. " scale=" .. tostring(scale))
+    if not wr(DIR .. "summon_probe15.txt", table.concat(out, "\n")) then error("could not write summon_probe15.txt") end
+    return "summon_probe15: missing pieces (see file)"
+  end
+  local fx, fz = 0.7071, 0.7071
+  local front = try(function() return cm:call("get_CameraFront") end)
+  if front and type(front.x) == "number" and type(front.z) == "number" then
+    local len = math.sqrt(front.x * front.x + front.z * front.z)
+    if len > 0.01 then fx, fz = front.x / len, front.z / len end
+  end
+  local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+
+  local function build_cont()
+    local shell = try(function() return gm:call("getPoolGeneratorID") end)
+    local genID = shell and try(function() return shell:call("makeNewGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    if genID and uniqID and spos then
+      return try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, spos, quat, scale, 3, 0, chara, 1)
+      end), uniqID
+    end
+    return nil, nil
+  end
+
+  local cont, uniqID = build_cont()
+  L("container isReadyPrefab BEFORE standby = " ..
+    tostring(cont and try(function() return cc:call("isReadyPrefab", cont) end)))
+
+  -- Where does LoadArea live? Scan the container + sub-info types.
+  local function scan_loadarea(obj, label)
+    if not obj then return nil, nil end
+    local td = try(function() return obj:get_type_definition() end)
+    local setter = nil
+    for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+      local nm = tostring(try(function() return m:get_name() end) or "")
+      if nm:lower():find("loadarea") then
+        L("  " .. label .. " method " .. nm)
+        if nm:lower():find("set") then setter = nm end
+      end
+    end
+    local cur = try(function() return obj:call("get_LoadArea") end)
+    if cur ~= nil then L("  " .. label .. " get_LoadArea = " .. tostring(cur)) end
+    if setter then return obj, setter end
+    return nil, nil
+  end
+  local la_obj, la_setter = scan_loadarea(cont, "container")
+  if not la_obj and cont then
+    for _, gname in ipairs({ "get_CommonInfo", "get_CharaInfo", "get_StatusInfo",
+                             "get_BattleNoticeInfo", "get_SetFlagInfo" }) do
+      local sub = try(function() return cont:call(gname) end)
+      local o, st = scan_loadarea(sub, gname)
+      if o then la_obj, la_setter = o, st break end
+    end
+  end
+  L("LoadArea setter: " .. tostring(la_setter) .. " on " .. tostring(la_obj))
+
+  -- Standby (manager + catalog), then re-read both states.
+  if cont then
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+  end
+  local _, valid1, ready1 = prefab_state(pc)
+  L("after standby: prefab valid=" .. tostring(valid1) .. " ready=" .. tostring(ready1) ..
+    " | container isReadyPrefab=" ..
+    tostring(cont and try(function() return cc:call("isReadyPrefab", cont) end)))
+
+  -- The LoadArea=6 attempt: fresh container, set it, standby, fire once.
+  if la_obj and la_setter then
+    local cont2, uniq2 = build_cont()
+    if cont2 then
+      local function refind(obj)
+        local td = try(function() return obj:get_type_definition() end)
+        for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+          if tostring(try(function() return m:get_name() end) or "") == la_setter then
+            return obj
+          end
+        end
+        return nil
+      end
+      local target = refind(cont2)
+      if not target then
+        for _, gname in ipairs({ "get_CommonInfo", "get_CharaInfo", "get_StatusInfo",
+                                 "get_BattleNoticeInfo", "get_SetFlagInfo" }) do
+          local sub = try(function() return cont2:call(gname) end)
+          if sub and refind(sub) then target = sub break end
+        end
+      end
+      if target then
+        local okset = pcall(function() target:call(la_setter, 6) end)
+        L("set_LoadArea(6) on fresh container: " .. tostring(okset))
+        pcall(function() gm:call("requestStandbyPrefab", cont2) end)
+        local rdy = try(function() return cc:call("isReadyPrefab", cont2) end)
+        local _, v2, _ = prefab_state(pc)
+        L("LoadArea=6 container ready=" .. tostring(rdy) ..
+          " prefab valid=" .. tostring(v2))
+        SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+          cont2, "ch255000_00", chara, uniq2
+        SUMMON.ctrl = nil
+        SUMMON.fired = false
+        if rdy == true then
+          local fc = try(function()
+            return gm:call("forceRequestCreateInstance", cont2, function() end, function() end)
+          end)
+          L("force on LoadArea=6 container = " .. tostring(fc))
+          if type(fc) == "number" and fc >= 0 then SUMMON.fired = true end
+          L("(staged - Verify polls the instance; it will not fire again)")
+        end
+      else
+        L("could not re-find the LoadArea setter on the fresh container")
+      end
+    end
+  else
+    L("no LoadArea setter found - the bypass cannot be attempted this way")
+    if cont then
+      SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+        cont, "ch255000_00", chara, uniqID
+      SUMMON.ctrl = nil
+      SUMMON.fired = false
+    end
+  end
+
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe15.txt", text) then error("could not write summon_probe15.txt") end
+  return "summon_probe15.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.26: summon probe step 16
+-- Two facts converged: (1) standby DOES load the prefab - the
+-- 1.89.25 summon log reads valid=false at build, valid=true at
+-- verify - yet the accepted force request still produced nothing.
+-- (2) Every summon since round 7 used a MINTED GeneratorID, whose
+-- diag reads containsGenerateRegister=false; round 4's POOLED-ID
+-- container read TRUE. requestGenerate (the controller door) has
+-- returned nil for every minted ID. This probe is a state machine
+-- - press it repeatedly: run 1 builds ONE container on the pooled
+-- GeneratorID (+ LoadArea=6 if a setter exists) and starts the
+-- standby load; later runs re-read validity and, once valid=true,
+-- fire requestGenerate first, force behind it, exactly once.
+-- (Resolution uses a local field map: probes sit above enum_value
+-- in this file, so that helper is out of their scope - the
+-- probes 14/15 chara=nil bug.)
+COMMANDS.summon_probe16 = function()
+  local out = {}
+  local function L(x)
+    if #out < 400 then out[#out + 1] = x end
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  L("== summon_probe16 (bridge 1.89.67) ==")
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    if not wr(DIR .. "summon_probe16.txt", table.concat(out, "\n")) then error("could not write summon_probe16.txt") end
+    return "summon_probe16: managers missing"
+  end
+
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid(pc)
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end),
+           item and try(function() return item:call("get_Ready") end)
+  end
+  local pc = find_ctrl("ch255000_00")
+  local pv, pr = prefab_valid(pc)
+  L("prefab: valid=" .. tostring(pv) .. " ready=" .. tostring(pr))
+
+  local P = SUMMON.pool
+  if P and P.done then
+    L("pool summon already fired - use Verify / Summon log from here")
+    if not wr(DIR .. "summon_probe16.txt", table.concat(out, "\n")) then error("could not write summon_probe16.txt") end
+    return "summon_probe16: already fired (see file)"
+  end
+
+  if not P then
+    -- Build the one pooled-ID container.
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and ppos and quat and scale) then
+      L("missing pieces at build: chara=" .. tostring(chara) ..
+        " pos=" .. tostring(ppos) .. " quat=" .. tostring(quat))
+      if not wr(DIR .. "summon_probe16.txt", table.concat(out, "\n")) then error("could not write summon_probe16.txt") end
+      return "summon_probe16: missing pieces (see file)"
+    end
+    local fx, fz = 0.7071, 0.7071
+    local front = try(function() return cm:call("get_CameraFront") end)
+    if front and type(front.x) == "number" and type(front.z) == "number" then
+      local len = math.sqrt(front.x * front.x + front.z * front.z)
+      if len > 0.01 then fx, fz = front.x / len, front.z / len end
+    end
+    local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID and spos then
+      cont = try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, spos, quat, scale, 3, 0, chara, 1)
+      end)
+    end
+    if not cont then
+      L("pooled container build failed")
+      if not wr(DIR .. "summon_probe16.txt", table.concat(out, "\n")) then error("could not write summon_probe16.txt") end
+      return "summon_probe16: container build failed"
+    end
+    L("pooled-ID container built (NOT minted)")
+    L("diag containsGenerateRegister=" ..
+      tostring(try(function() return gm:call("checkContainsGenerateRegister", cont) end)) ..
+      " checkRegenerate=" ..
+      tostring(try(function() return gm:call("checkRegenerate", cont) end)))
+    -- LoadArea hunt (from step 15, which never got to run it).
+    local function scan_loadarea(obj)
+      if not obj then return nil, nil end
+      local td = try(function() return obj:get_type_definition() end)
+      for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+        local nm = tostring(try(function() return m:get_name() end) or "")
+        if nm:lower():find("loadarea") and nm:lower():find("set") then
+          return obj, nm
+        end
+      end
+      return nil, nil
+    end
+    local la_obj, la_setter = scan_loadarea(cont)
+    if not la_obj then
+      for _, gname in ipairs({ "get_CommonInfo", "get_CharaInfo", "get_StatusInfo",
+                               "get_BattleNoticeInfo", "get_SetFlagInfo" }) do
+        local sub = try(function() return cont:call(gname) end)
+        local o, st = scan_loadarea(sub)
+        if o then la_obj, la_setter = o, st break end
+      end
+    end
+    if la_obj and la_setter then
+      local okset = pcall(function() la_obj:call(la_setter, 6) end)
+      L("LoadArea set to 6 via " .. la_setter .. ": " .. tostring(okset))
+    else
+      L("no LoadArea setter found on container/sub-infos")
+    end
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    SUMMON.pool = { cont = cont, uniq = uniqID, chara = chara, done = false }
+    L("standby started - press probe step 16 again in a few seconds")
+    if not wr(DIR .. "summon_probe16.txt", table.concat(out, "\n")) then error("could not write summon_probe16.txt") end
+    return "summon_probe16: standby started (see file)"
+  end
+
+  -- Loading stage: re-check validity, fire once when valid.
+  if pv ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    local ci = try(function() return P.cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    L("prefab still loading (valid=" .. tostring(pv) ..
+      ") - standby re-requested; press probe step 16 again")
+    if not wr(DIR .. "summon_probe16.txt", table.concat(out, "\n")) then error("could not write summon_probe16.txt") end
+    return "summon_probe16: still loading (see file)"
+  end
+
+  L("prefab VALID - firing on the pooled-ID container")
+  local cb = function() end
+  local ctrl = try(function()
+    return gm:call("requestGenerate", P.cont, 8 + 35184372088832, false, false, cb, cb)
+  end)
+  L("requestGenerate = " .. tostring(ctrl) .. (ctrl and " (CONTROLLER!)" or ""))
+  local fc = nil
+  if not ctrl then
+    fc = try(function()
+      return gm:call("forceRequestCreateInstance", P.cont, cb, cb)
+    end)
+    L("force = " .. tostring(fc))
+  end
+  P.done = true
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.ctrl = ctrl
+  SUMMON.fired = (ctrl ~= nil) or (type(fc) == "number" and fc >= 0)
+  L("post-fire: queued=" ..
+    tostring(try(function() return gm:call("containsRequest", 3, P.uniq) end)) ..
+    " instantiateReq=" ..
+    tostring(try(function() return gm:call("hasInstantiateRequest", 3, P.uniq) end)) ..
+    " genInfo=" ..
+    (try(function() return gm:call("getGeneratedInstanceInfo", 3, P.uniq) end) and "present" or "none") ..
+    " instance=" ..
+    tostring(pm and try(function() return pm:call("getInstanceChara", 3, P.chara) end)))
+  if ctrl then
+    L("controller: IsGenerated=" ..
+      tostring(try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " RequestState=" ..
+      tostring(try(function() return ctrl:call("get_RequestState") end)))
+  end
+  L("WATCH THE SPAWN SPOT - then Verify polls the instance")
+  local text = table.concat(out, "\n")
+  if not wr(DIR .. "summon_probe16.txt", text) then error("could not write summon_probe16.txt") end
+  return "summon_probe16.txt written: " .. #out .. " lines"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.27: summon probe step 17
+-- Step 16 FIRED: requestGenerate returned a controller and the
+-- request queued - but nothing materialized, and the follow-up
+-- trail was lost when a ch240000 summon overwrote SUMMON and the
+-- summon log. Step 17 keeps step 16's recipe (pooled GeneratorID,
+-- LoadArea=6, standby-until-valid, requestGenerate first) and adds
+-- what was missing: an accumulated history inside the probe file
+-- itself (immune to summon_log resets) and a polling stage - every
+-- press after the fire appends the controller's state, range flags
+-- and the instance check, so the file shows whether the queued
+-- controller advances, stalls, or dies.
+COMMANDS.summon_probe17 = function()
+  local P = SUMMON.pool17
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool17 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 900 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe17.txt", text) then error("could not write summon_probe17.txt") end
+    return "summon_probe17: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end),
+           item and try(function() return item:call("get_Ready") end)
+  end
+  local function poll(tag)
+    local ctrl = P.ctrl
+    L(tag .. ": ctrl generated=" ..
+      tostring(ctrl and try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " state=" ..
+      tostring(ctrl and try(function() return ctrl:call("get_RequestState") end)) ..
+      " queued=" ..
+      tostring(try(function() return gm:call("containsRequest", 3, P.uniq) end)) ..
+      " genInfo=" ..
+      (try(function() return gm:call("getGeneratedInstanceInfo", 3, P.uniq) end) and "present" or "none") ..
+      " instance=" ..
+      tostring(pm and try(function() return pm:call("getInstanceChara", 3, P.chara) end)))
+    if ctrl then
+      L("  range: fixPos=" ..
+        tostring(try(function() return ctrl:call("get_IsFixGeneratePosition") end)) ..
+        " inRange=" ..
+        tostring(try(function() return ctrl:call("get_IsInGenerateRangeForReserveDistributorUnit") end)) ..
+        " pos=" ..
+        tostring(try(function() local p = ctrl:call("get_Position") return p and (tostring(p.x) .. "," .. tostring(p.y) .. "," .. tostring(p.z)) end)))
+    end
+  end
+
+  if P.done then
+    poll("poll")
+    return flush("poll appended")
+  end
+
+  if not P.cont then
+    L("== summon_probe17 (bridge 1.89.67) == build")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and ppos and quat and scale) then
+      L("missing pieces at build")
+      return flush("missing pieces")
+    end
+    local fx, fz = 0.7071, 0.7071
+    local front = try(function() return cm:call("get_CameraFront") end)
+    if front and type(front.x) == "number" and type(front.z) == "number" then
+      local len = math.sqrt(front.x * front.x + front.z * front.z)
+      if len > 0.01 then fx, fz = front.x / len, front.z / len end
+    end
+    local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID and spos then
+      cont = try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, spos, quat, scale, 3, 0, chara, 1)
+      end)
+    end
+    if not cont then
+      L("pooled container build failed")
+      return flush("build failed")
+    end
+    local function scan_loadarea(obj)
+      if not obj then return nil, nil end
+      local td = try(function() return obj:get_type_definition() end)
+      for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+        local nm = tostring(try(function() return m:get_name() end) or "")
+        if nm:lower():find("loadarea") and nm:lower():find("set") then
+          return obj, nm
+        end
+      end
+      return nil, nil
+    end
+    local la_obj, la_setter = scan_loadarea(cont)
+    if not la_obj then
+      for _, gname in ipairs({ "get_CommonInfo", "get_CharaInfo", "get_StatusInfo",
+                               "get_BattleNoticeInfo", "get_SetFlagInfo" }) do
+        local sub = try(function() return cont:call(gname) end)
+        local o, st = scan_loadarea(sub)
+        if o then la_obj, la_setter = o, st break end
+      end
+    end
+    if la_obj and la_setter then
+      pcall(function() la_obj:call(la_setter, 6) end)
+      L("LoadArea=6 set via " .. la_setter)
+    else
+      L("no LoadArea setter found")
+    end
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara = cont, uniqID, chara
+    local pv, pr = prefab_valid()
+    L("container built (pooled ID); prefab valid=" .. tostring(pv) ..
+      " ready=" .. tostring(pr) .. " - standby started")
+    return flush("standby started")
+  end
+
+  local pv, pr = prefab_valid()
+  if pv ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    local ci = try(function() return P.cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    L("loading: prefab valid=" .. tostring(pv) .. " ready=" .. tostring(pr) ..
+      " - standby re-requested")
+    return flush("still loading")
+  end
+
+  L("prefab VALID - firing requestGenerate on pooled container")
+  local cb = function() end
+  local ctrl = try(function()
+    return gm:call("requestGenerate", P.cont, 8 + 35184372088832, false, false, cb, cb)
+  end)
+  L("requestGenerate = " .. tostring(ctrl) .. (ctrl and " (CONTROLLER)" or ""))
+  if not ctrl then
+    local fc = try(function()
+      return gm:call("forceRequestCreateInstance", P.cont, cb, cb)
+    end)
+    L("force fallback = " .. tostring(fc))
+  end
+  P.ctrl = ctrl
+  P.done = true
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.ctrl = ctrl
+  SUMMON.fired = true
+  poll("post-fire")
+  L("keep pressing probe step 17 - each press appends a poll line")
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.28: summon probe step 18
+-- Step 17's queued controller NEVER advances: state=0 frozen,
+-- queued=true, and the distributor range flag reads FALSE with a
+-- garbage controller position (16646938897890.0,0,0) - the
+-- distributor never claims it, and a later poll press crashed the
+-- game (queued generate objects are perishable; do not poll them).
+-- Route G (GenerateManager) is therefore parked. Route I was never
+-- actually attempted on the CORRECT prefab: step 13 grabbed the
+-- first path match (an invalid _01). This probe uses the aligned
+-- catalog lookup for ch255000_00's own controller, drives its
+-- prefab to valid via the proven container standby, then calls
+-- via.Prefab.instantiate(pos, quat) exactly once - the standard
+-- REFramework spawn primitive, no distributor, no queue, nothing
+-- polled afterwards.
+COMMANDS.summon_probe18 = function()
+  local P = SUMMON.pool18
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool18 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 400 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe18.txt", text) then error("could not write summon_probe18.txt") end
+    return "summon_probe18: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local pc = find_ctrl("ch255000_00")
+  local item = pc and try(function() return pc:get_field("_Item") end)
+  local pvalid = item and try(function() return item:call("get_Valid") end)
+  local pready = item and try(function() return item:call("get_Ready") end)
+
+  if P.done then
+    L("already instantiated this session - see above; not repeating")
+    return flush("already done")
+  end
+
+  if not P.cont then
+    L("== summon_probe18 (bridge 1.89.67) == build (standby vehicle)")
+    L("aligned controller path=" ..
+      tostring(pc and try(function() return pc:call("get_ResourcePath") end)) ..
+      " prefab valid=" .. tostring(pvalid) .. " ready=" .. tostring(pready))
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and ppos and quat and scale) then
+      L("missing pieces at build")
+      return flush("missing pieces")
+    end
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      cont = try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, ppos, quat, scale, 3, 0, chara, 1)
+      end)
+    end
+    if not cont then
+      L("standby-vehicle container build failed")
+      return flush("build failed")
+    end
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont = cont
+    L("standby started - press probe step 18 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if pvalid ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    local ci = try(function() return P.cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    L("loading: prefab valid=" .. tostring(pvalid) ..
+      " ready=" .. tostring(pready) .. " - standby re-requested")
+    return flush("still loading")
+  end
+
+  -- Prefab is valid: instantiate it at the summon spot, once.
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  if not (ppos and quat) then
+    L("player transform unavailable at fire time")
+    return flush("no transform")
+  end
+  local fx, fz = 0.7071, 0.7071
+  local front = try(function() return cm:call("get_CameraFront") end)
+  if front and type(front.x) == "number" and type(front.z) == "number" then
+    local len = math.sqrt(front.x * front.x + front.z * front.z)
+    if len > 0.01 then fx, fz = front.x / len, front.z / len end
+  end
+  local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+  L("prefab VALID - instantiating at " ..
+    tostring(spos and spos.x) .. ", " .. tostring(spos and spos.y) ..
+    ", " .. tostring(spos and spos.z))
+  local go = item and spos and try(function() return item:call("instantiate", spos, quat) end)
+  L("instantiate(pos, quat) -> " .. tostring(go))
+  if go then
+    L("gameobject name = " ..
+      tostring(try(function() return go:call("get_Name") end)))
+    L("INSTANTIATED - look at the spawn spot NOW")
+  else
+    L("instantiate returned nil (guarded, no exception captured)")
+  end
+  P.done = true
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.29: summon probe step 19
+-- Route I verdict: instantiate(pos, quat) on a valid prefab
+-- returned nil - dead end (the async requestToInstantiate is the
+-- only sibling, untested). Back to Route G with the one concrete
+-- defect steps 16/17 exposed: the queued controller's position
+-- was garbage and it sat out of the distributor's range forever.
+-- The factory takes a position, but CommonInfo carries SEPARATE
+-- Initial/Context positions that were never set explicitly. This
+-- probe sets them (plus the initial angle and the container's
+-- transform), reads them back, then - once the prefab is valid -
+-- fires requestGenerate once and snapshots the controller's
+-- position/range IN THE SAME CALL. No cross-press polling: queued
+-- controllers are perishable. If the snapshot position is still
+-- garbage, restart the game promptly to clear the queued request.
+COMMANDS.summon_probe19 = function()
+  local P = SUMMON.pool19
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool19 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 400 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe19.txt", text) then error("could not write summon_probe19.txt") end
+    return "summon_probe19: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+  local function v3(v)
+    if not v then return "nil" end
+    return tostring(v.x) .. "," .. tostring(v.y) .. "," .. tostring(v.z)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end)
+  end
+
+  if P.done then
+    L("already fired this session - not repeating (see snapshot above)")
+    return flush("already done")
+  end
+
+  if not P.cont then
+    L("== summon_probe19 (bridge 1.89.67) == build + position fix")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and ppos and quat and scale) then
+      L("missing pieces at build")
+      return flush("missing pieces")
+    end
+    local fx, fz = 0.7071, 0.7071
+    local front = try(function() return cm:call("get_CameraFront") end)
+    if front and type(front.x) == "number" and type(front.z) == "number" then
+      local len = math.sqrt(front.x * front.x + front.z * front.z)
+      if len > 0.01 then fx, fz = front.x / len, front.z / len end
+    end
+    local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+    L("spawn pos = " .. v3(spos))
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID and spos then
+      cont = try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, spos, quat, scale, 3, 0, chara, 1)
+      end)
+    end
+    if not cont then
+      L("container build failed")
+      return flush("build failed")
+    end
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    L("CommonInfo before fix: initial=" ..
+      v3(ci and try(function() return ci:call("get_InitialPosition") end)) ..
+      " context=" ..
+      v3(ci and try(function() return ci:call("get_ContextPosition") end)))
+    local ok1, e1 = pcall(function() ci:call("setInitialPosition", spos) end)
+    local ok2, e2 = pcall(function() ci:call("setContextPosition", spos) end)
+    local ok3, e3 = pcall(function() ci:call("setInitialAngle", quat) end)
+    L("setInitialPosition=" .. tostring(ok1) .. " setContextPosition=" ..
+      tostring(ok2) .. " setInitialAngle=" .. tostring(ok3))
+    if not (ok1 and ok2 and ok3) then
+      L("  errors: " .. tostring(e1) .. " | " .. tostring(e2) .. " | " .. tostring(e3))
+    end
+    local ok4, e4 = pcall(function() cont:call("setTransform", spos, quat) end)
+    if not ok4 then
+      local ok5, e5 = pcall(function() cont:call("setTransform", spos) end)
+      L("setTransform(pos,quat) failed (" .. tostring(e4) ..
+        "); setTransform(pos)=" .. tostring(ok5) ..
+        (ok5 and "" or (" (" .. tostring(e5) .. ")")))
+    else
+      L("setTransform(pos, quat)=true")
+    end
+    L("CommonInfo after fix: initial=" ..
+      v3(ci and try(function() return ci:call("get_InitialPosition") end)) ..
+      " context=" ..
+      v3(ci and try(function() return ci:call("get_ContextPosition") end)))
+    -- LoadArea=6 (the step 16/17 recipe).
+    local td = try(function() return cont:get_type_definition() end)
+    local setter = nil
+    for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+      local nm = tostring(try(function() return m:get_name() end) or "")
+      if nm:lower():find("loadarea") and nm:lower():find("set") then setter = nm break end
+    end
+    if setter then
+      pcall(function() cont:call(setter, 6) end)
+      L("LoadArea=6 via " .. setter)
+    else
+      L("no LoadArea setter on container this time")
+    end
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara = cont, uniqID, chara
+    L("standby started - press probe step 19 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if prefab_valid() ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    local ci = try(function() return P.cont:call("get_CommonInfo") end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    L("loading: prefab not valid yet - standby re-requested")
+    return flush("still loading")
+  end
+
+  L("prefab VALID - firing requestGenerate once (position-fixed container)")
+  local cb = function() end
+  local okG, ctrl = pcall(function()
+    return gm:call("requestGenerate", P.cont, 8 + 35184372088832, false, false, cb, cb)
+  end)
+  L("requestGenerate ok=" .. tostring(okG) .. " -> " .. tostring(ctrl) ..
+    (okG and "" or (" err=" .. tostring(ctrl))))
+  if okG and ctrl then
+    L("SNAPSHOT ctrl: generated=" ..
+      tostring(try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " state=" ..
+      tostring(try(function() return ctrl:call("get_RequestState") end)) ..
+      " pos=" ..
+      v3(try(function() return ctrl:call("get_Position") end)) ..
+      " inRange=" ..
+      tostring(try(function() return ctrl:call("get_IsInGenerateRangeForReserveDistributorUnit") end)) ..
+      " fixPos=" ..
+      tostring(try(function() return ctrl:call("get_IsFixGeneratePosition") end)))
+    SUMMON.ctrl = ctrl
+  else
+    local fc = try(function()
+      return gm:call("forceRequestCreateInstance", P.cont, cb, cb)
+    end)
+    L("force fallback = " .. tostring(fc))
+  end
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.fired = true
+  P.done = true
+  L("fired. If the snapshot pos reads like the spawn pos and inRange=true,")
+  L("watch the spot; ONE Verify in ~15s reads the outcome. If pos is")
+  L("garbage again, restart the game promptly to clear the queue.")
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.30: summon probe step 20
+-- The reference Enemy Spawner mod (Nexus 940, handed over by the
+-- user) spawns through a door this project never assembled
+-- correctly: gm:requestCreateInstance with the FULL overload -
+-- (PrefabController, GenerateInfoContainer, Int32, InstanceInfo,
+-- Action, Action). Its recipe, reimplemented here from the API
+-- facts: the container comes from a fresh app.InstanceInfo (not
+-- the GenerateManager factory); CommonInfo gets set_ObjectID
+-- (pointer to gm:getIdWrapper(charID)) and setContextPosition /
+-- setContextAngle (CONTEXT, not Initial); the request ID comes
+-- from a fresh app.RequestID:makeNewRequestID(); the prefab gate
+-- is get_Ready() after prefab-level set_Standby(true); the
+-- InstanceInfo is the enrollment the instance registers into.
+COMMANDS.summon_probe20 = function()
+  local P = SUMMON.pool20
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool20 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 400 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe20.txt", text) then error("could not write summon_probe20.txt") end
+    return "summon_probe20: " .. tag
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("managers missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+
+  if P.done then
+    local go = P.inst and try(function() return P.inst:call("get_Instance") end)
+    local ch = P.inst and try(function() return P.inst:call("get_Chara") end)
+    L("post-spawn read: instance GameObject=" .. tostring(go) ..
+      " Chara=" .. tostring(ch))
+    return flush("post-spawn read")
+  end
+
+  if not P.inst then
+    L("== summon_probe20 (bridge 1.89.67) == setup")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    if not chara then
+      L("ch255000_00 not resolvable")
+      return flush("no chara")
+    end
+    P.chara = chara
+    -- PrefabController via the merged catalog (RefCounter chain).
+    local cc = try(function() return gm:call("get_CatalogCtrl") end)
+    local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+    local merged = ec and try(function() return ec:get_field("<MergedCatalog>k__BackingField") end)
+    local rc = merged and try(function() return merged:call("get_Item", chara) end)
+    local pfbCtrl = rc and try(function() return rc:call("get_Item") end)
+    L("merged catalog chain: rc=" .. tostring(rc) .. " prefabCtrl=" .. tostring(pfbCtrl))
+    if not pfbCtrl then
+      L("no prefab controller for ch255000_00 in merged catalog")
+      return flush("no prefab controller")
+    end
+    P.pfbCtrl = pfbCtrl
+    local prefab = try(function() return pfbCtrl:call("get_Item") end)
+    P.prefab = prefab
+    L("prefab path=" ..
+      tostring(prefab and try(function() return prefab:call("get_Path") end)) ..
+      " ready=" ..
+      tostring(prefab and try(function() return prefab:call("get_Ready") end)))
+    -- Fresh InstanceInfo + its container.
+    local inst = try(function() return sdk.create_instance("app.InstanceInfo"):add_ref() end)
+    local cont = inst and try(function() return inst:call("get_Container") end)
+    L("InstanceInfo=" .. tostring(inst) .. " container=" .. tostring(cont))
+    if not inst or not cont then
+      L("InstanceInfo/container creation failed")
+      return flush("no instanceinfo")
+    end
+    P.inst, P.cont = inst, cont
+    -- Request ID from a fresh app.RequestID.
+    local robj = try(function() return sdk.create_instance("app.RequestID"):add_ref() end)
+    local rid = robj and try(function() return robj:call("makeNewRequestID") end)
+    P.rid = rid
+    L("requestID object=" .. tostring(robj) .. " makeNewRequestID=" .. tostring(rid))
+    -- Generator ID wrapper for the ObjectID.
+    local wrap = try(function() return gm:call("getIdWrapper", chara) end)
+    L("getIdWrapper=" .. tostring(wrap))
+    -- Player transform / spawn spot.
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    if not (ppos and quat) then
+      L("player transform unavailable")
+      return flush("no transform")
+    end
+    local fx, fz = 0.7071, 0.7071
+    local front = try(function() return cm:call("get_CameraFront") end)
+    if front and type(front.x) == "number" and type(front.z) == "number" then
+      local len = math.sqrt(front.x * front.x + front.z * front.z)
+      if len > 0.01 then fx, fz = front.x / len, front.z / len end
+    end
+    local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+    -- Init (the mod's SpawnInstance.init, our own wiring):
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    local okS, eS = pcall(function() prefab:call("set_Standby", true) end)
+    L("prefab set_Standby(true): " .. tostring(okS) .. (okS and "" or (" " .. tostring(eS))))
+    if wrap then
+      local okO, eO = pcall(function() ci:call("set_ObjectID", sdk.to_ptr(wrap)) end)
+      L("CommonInfo set_ObjectID(to_ptr(wrapper)): " .. tostring(okO) ..
+        (okO and "" or (" " .. tostring(eO))))
+    else
+      local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+      local okF, eF = pcall(function() oid:set_field("_SelectedCharacterID", chara) end)
+      L("fallback _ObjectID._SelectedCharacterID set: " .. tostring(okF) ..
+        (okF and "" or (" " .. tostring(eF))))
+    end
+    local okP, eP = pcall(function() ci:call("setContextPosition", spos) end)
+    local okA, eA = pcall(function() ci:call("setContextAngle", quat) end)
+    L("setContextPosition=" .. tostring(okP) .. " setContextAngle=" .. tostring(okA))
+    if not (okP and okA) then
+      L("  errors: " .. tostring(eP) .. " | " .. tostring(eA))
+    end
+    L("setup complete - press probe step 20 again (spawn fires when prefab ready)")
+    return flush("setup complete")
+  end
+
+  -- Spawn stage: gate on the prefab's Ready, then the full call.
+  local ready = P.prefab and try(function() return P.prefab:call("get_Ready") end)
+  if ready ~= true then
+    pcall(function() P.prefab:call("set_Standby", true) end)
+    L("waiting: prefab ready=" .. tostring(ready) .. " - standby re-set")
+    return flush("waiting for prefab")
+  end
+  L("prefab READY - calling requestCreateInstance (full overload)")
+  local ok, err = pcall(function()
+    return gm:call("requestCreateInstance(app.PrefabController, app.GenerateInfo.GenerateInfoContainer, System.Int32, app.InstanceInfo, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>)",
+      P.pfbCtrl, P.cont, P.rid, P.inst, nil, nil)
+  end)
+  L("requestCreateInstance: ok=" .. tostring(ok) ..
+    (ok and "" or (" err=" .. tostring(err))))
+  P.done = true
+  local go = try(function() return P.inst:call("get_Instance") end)
+  L("t=0 instance GameObject=" .. tostring(go) ..
+    " (async - later presses re-read it)")
+  L("WATCH THE SPAWN SPOT")
+  return flush("spawn requested")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.31: summon probe step 21
+-- Step 20 executed the reference recipe cleanly - every joint
+-- ok, requestCreateInstance returned ok - yet nothing
+-- materialized. One marshaling suspect stands out in its log:
+-- makeNewRequestID() returned a MANAGED OBJECT, while the
+-- overload's third parameter is System.Int32. If the object was
+-- coerced to garbage (or 0), the request carries an ID the
+-- completion path never matches and the instance is silently
+-- dropped. This probe dumps app.RequestID (declared return type
+-- of makeNewRequestID + every field of the returned object),
+-- extracts the numeric ID, and retries the identical spawn with
+-- that number as parameter 3.
+COMMANDS.summon_probe21 = function()
+  local P = SUMMON.pool21
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool21 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 400 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe21.txt", text) then error("could not write summon_probe21.txt") end
+    return "summon_probe21: " .. tag
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("managers missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+
+  if P.done then
+    local go = P.inst and try(function() return P.inst:call("get_Instance") end)
+    local ch = P.inst and try(function() return P.inst:call("get_Chara") end)
+    L("post-spawn read: instance GameObject=" .. tostring(go) ..
+      " Chara=" .. tostring(ch))
+    return flush("post-spawn read")
+  end
+
+  if not P.inst then
+    L("== summon_probe21 (bridge 1.89.67) == setup + RequestID dump")
+    -- RequestID forensics first.
+    local rtd = try(function() return sdk.find_type_definition("app.RequestID") end)
+    local mm = rtd and try(function() return rtd:get_method("makeNewRequestID") end)
+    local rt = mm and try(function() return mm:get_return_type() end)
+    L("makeNewRequestID declared return type: " ..
+      tostring(rt and try(function() return rt:get_name() end)))
+    local robj = try(function() return sdk.create_instance("app.RequestID"):add_ref() end)
+    local rid = robj and try(function() return robj:call("makeNewRequestID") end)
+    L("requestID object=" .. tostring(robj) .. " makeNewRequestID -> " .. tostring(rid))
+    local function dump_fields(obj, label)
+      local td = obj and try(function() return obj:get_type_definition() end)
+      local fields = td and try(function() return td:get_fields() end)
+      if not fields then
+        L(label .. ": no type definition")
+        return nil
+      end
+      local found = nil
+      for _, f in ipairs(fields) do
+        local nm = try(function() return f:get_name() end)
+        if nm then
+          local v = try(function() return obj:get_field(nm) end)
+          L("  " .. label .. "." .. nm .. " = " .. tostring(v) ..
+            " (" .. type(v) .. ")")
+          if type(v) == "number" and not found then found = v end
+        end
+      end
+      return found
+    end
+    local numid = dump_fields(rid, "returned")
+    if not numid then numid = dump_fields(robj, "requestObj") end
+    P.numid = numid
+    L("extracted numeric request ID: " .. tostring(numid))
+    -- Character + prefab controller (merged catalog chain).
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    if not chara then
+      L("ch255000_00 not resolvable")
+      return flush("no chara")
+    end
+    P.chara = chara
+    local cc = try(function() return gm:call("get_CatalogCtrl") end)
+    local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+    local merged = ec and try(function() return ec:get_field("<MergedCatalog>k__BackingField") end)
+    local rc = merged and try(function() return merged:call("get_Item", chara) end)
+    local pfbCtrl = rc and try(function() return rc:call("get_Item") end)
+    if not pfbCtrl then
+      L("no prefab controller for ch255000_00 in merged catalog")
+      return flush("no prefab controller")
+    end
+    P.pfbCtrl = pfbCtrl
+    local prefab = try(function() return pfbCtrl:call("get_Item") end)
+    P.prefab = prefab
+    L("prefab path=" ..
+      tostring(prefab and try(function() return prefab:call("get_Path") end)) ..
+      " ready=" ..
+      tostring(prefab and try(function() return prefab:call("get_Ready") end)))
+    local inst = try(function() return sdk.create_instance("app.InstanceInfo"):add_ref() end)
+    local cont = inst and try(function() return inst:call("get_Container") end)
+    if not inst or not cont then
+      L("InstanceInfo/container creation failed")
+      return flush("no instanceinfo")
+    end
+    P.inst, P.cont = inst, cont
+    local wrap = try(function() return gm:call("getIdWrapper", chara) end)
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    if not (ppos and quat) then
+      L("player transform unavailable")
+      return flush("no transform")
+    end
+    local fx, fz = 0.7071, 0.7071
+    local front = try(function() return cm:call("get_CameraFront") end)
+    if front and type(front.x) == "number" and type(front.z) == "number" then
+      local len = math.sqrt(front.x * front.x + front.z * front.z)
+      if len > 0.01 then fx, fz = front.x / len, front.z / len end
+    end
+    local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    pcall(function() prefab:call("set_Standby", true) end)
+    if wrap then
+      pcall(function() ci:call("set_ObjectID", sdk.to_ptr(wrap)) end)
+    end
+    pcall(function() ci:call("setContextPosition", spos) end)
+    pcall(function() ci:call("setContextAngle", quat) end)
+    L("setup complete (wrapper=" .. tostring(wrap) ..
+      ") - press probe step 21 again to fire with the numeric ID")
+    return flush("setup complete")
+  end
+
+  local ready = P.prefab and try(function() return P.prefab:call("get_Ready") end)
+  if ready ~= true then
+    pcall(function() P.prefab:call("set_Standby", true) end)
+    L("waiting: prefab ready=" .. tostring(ready) .. " - standby re-set")
+    return flush("waiting for prefab")
+  end
+  if P.numid == nil then
+    L("no numeric ID could be extracted - cannot fire the Int32 variant")
+    P.done = true
+    return flush("no numeric id")
+  end
+  L("prefab READY - firing requestCreateInstance with numeric ID " ..
+    tostring(P.numid))
+  local ok, err = pcall(function()
+    return gm:call("requestCreateInstance(app.PrefabController, app.GenerateInfo.GenerateInfoContainer, System.Int32, app.InstanceInfo, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>)",
+      P.pfbCtrl, P.cont, P.numid, P.inst, nil, nil)
+  end)
+  L("requestCreateInstance(int): ok=" .. tostring(ok) ..
+    (ok and "" or (" err=" .. tostring(err))))
+  P.done = true
+  L("WATCH THE SPAWN SPOT - later presses re-read the instance")
+  return flush("spawn requested (int id)")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.32: summon probe step 22
+-- Step 21's forensics killed the numeric-ID theory:
+-- makeNewRequestID's declared return type IS app.RequestID, a
+-- composite { _GenID, _UniqID } with no numeric field anywhere.
+-- So the mod's "System.Int32" signature string cannot be the
+-- overload that actually serves its call on this game build -
+-- either an app.RequestID overload exists and REFramework
+-- resolves by arguments, or TU4 changed the table. This probe
+-- censuses EVERY requestCreateInstance overload on
+-- app.GenerateManager with full parameter types, then fires the
+-- one whose third parameter is app.RequestID, passing the
+-- RequestID object itself.
+COMMANDS.summon_probe22 = function()
+  local P = SUMMON.pool22
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool22 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe22.txt", text) then error("could not write summon_probe22.txt") end
+    return "summon_probe22: " .. tag
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("managers missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+
+  if P.done then
+    local go = P.inst and try(function() return P.inst:call("get_Instance") end)
+    local ch = P.inst and try(function() return P.inst:call("get_Chara") end)
+    L("post-spawn read: instance GameObject=" .. tostring(go) ..
+      " Chara=" .. tostring(ch))
+    return flush("post-spawn read")
+  end
+
+  if not P.inst then
+    L("== summon_probe22 (bridge 1.89.67) == overload census + setup")
+    local gtd = try(function() return gm:get_type_definition() end)
+    local methods = gtd and try(function() return gtd:get_methods() end)
+    local chosen = nil
+    local count = 0
+    for _, m in ipairs(methods or {}) do
+      local nm = try(function() return m:get_name() end)
+      if nm == "requestCreateInstance" then
+        count = count + 1
+        local params = try(function() return m:get_params() end)
+        local types = {}
+        for _, prm in ipairs(params or {}) do
+          local pt = try(function() return prm:get_type() end)
+          types[#types + 1] =
+            tostring(pt and try(function() return pt:get_name() end))
+        end
+        local sig = "requestCreateInstance(" .. table.concat(types, ", ") .. ")"
+        L("overload #" .. count .. ": " .. sig)
+        if types[3] and types[3]:find("RequestID") then chosen = sig end
+      end
+    end
+    L("overloads found: " .. count .. " | RequestID-param overload: " ..
+      tostring(chosen))
+    P.sig = chosen -- nil means: fall back to plain-name resolution
+    -- Character + prefab controller (merged catalog chain).
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    if not chara then
+      L("ch255000_00 not resolvable")
+      return flush("no chara")
+    end
+    P.chara = chara
+    local cc = try(function() return gm:call("get_CatalogCtrl") end)
+    local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+    local merged = ec and try(function() return ec:get_field("<MergedCatalog>k__BackingField") end)
+    local rc = merged and try(function() return merged:call("get_Item", chara) end)
+    local pfbCtrl = rc and try(function() return rc:call("get_Item") end)
+    if not pfbCtrl then
+      L("no prefab controller for ch255000_00 in merged catalog")
+      return flush("no prefab controller")
+    end
+    P.pfbCtrl = pfbCtrl
+    local prefab = try(function() return pfbCtrl:call("get_Item") end)
+    P.prefab = prefab
+    local inst = try(function() return sdk.create_instance("app.InstanceInfo"):add_ref() end)
+    local cont = inst and try(function() return inst:call("get_Container") end)
+    if not inst or not cont then
+      L("InstanceInfo/container creation failed")
+      return flush("no instanceinfo")
+    end
+    P.inst, P.cont = inst, cont
+    local robj = try(function() return sdk.create_instance("app.RequestID"):add_ref() end)
+    local rid = robj and try(function() return robj:call("makeNewRequestID") end)
+    P.rid = rid
+    L("requestID (object) = " .. tostring(rid))
+    local wrap = try(function() return gm:call("getIdWrapper", chara) end)
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    local ppos = ptr and try(function() return ptr:call("get_Position") end)
+    local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+    if not (ppos and quat) then
+      L("player transform unavailable")
+      return flush("no transform")
+    end
+    local fx, fz = 0.7071, 0.7071
+    local front = try(function() return cm:call("get_CameraFront") end)
+    if front and type(front.x) == "number" and type(front.z) == "number" then
+      local len = math.sqrt(front.x * front.x + front.z * front.z)
+      if len > 0.01 then fx, fz = front.x / len, front.z / len end
+    end
+    local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    pcall(function() prefab:call("set_Standby", true) end)
+    if wrap then
+      pcall(function() ci:call("set_ObjectID", sdk.to_ptr(wrap)) end)
+    end
+    pcall(function() ci:call("setContextPosition", spos) end)
+    pcall(function() ci:call("setContextAngle", quat) end)
+    L("setup complete - press probe step 22 again to fire")
+    return flush("setup complete")
+  end
+
+  local ready = P.prefab and try(function() return P.prefab:call("get_Ready") end)
+  if ready ~= true then
+    pcall(function() P.prefab:call("set_Standby", true) end)
+    L("waiting: prefab ready=" .. tostring(ready) .. " - standby re-set")
+    return flush("waiting for prefab")
+  end
+  if P.sig then
+    L("prefab READY - firing dumped overload: " .. P.sig)
+    local ok, err = pcall(function()
+      return gm:call(P.sig, P.pfbCtrl, P.cont, P.rid, P.inst, nil, nil)
+    end)
+    L("requestCreateInstance(RequestID overload): ok=" .. tostring(ok) ..
+      (ok and "" or (" err=" .. tostring(err))))
+  else
+    L("prefab READY - no RequestID overload in census; plain-name call")
+    local ok, err = pcall(function()
+      return gm:call("requestCreateInstance",
+        P.pfbCtrl, P.cont, P.rid, P.inst, nil, nil)
+    end)
+    L("requestCreateInstance(plain name): ok=" .. tostring(ok) ..
+      (ok and "" or (" err=" .. tostring(err))))
+  end
+  P.done = true
+  L("WATCH THE SPAWN SPOT - later presses re-read the instance")
+  return flush("spawn requested")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.33: summon probe step 23
+-- Step 22's data: two requestCreateInstance overloads exist;
+-- the plain-name call THREW at invoke and the game FROZE. The
+-- reference mod never calls this from a command context - its
+-- pump runs inside re.on_application_entry("UpdateBehavior"),
+-- the game's behavior-update phase. Step 23 changes ONLY the
+-- execution context: the command stages the full spawn bundle,
+-- and a one-time UpdateBehavior hook (the mod's own hook) does
+-- the ready check and the fire - with the mod's verbatim
+-- signature string - then reads the instance back ~2s later.
+local function summon23_hook()
+  if SUMMON.hook23 then return end
+  SUMMON.hook23 = true
+  re.on_application_entry("UpdateBehavior", function()
+    local P = SUMMON.pool23
+    if not P or not P.armed then return end
+    if P.fired then
+      if not P.read then
+        P.ticks = (P.ticks or 0) + 1
+        if P.ticks >= 180 then
+          P.read = true
+          local go = try(function() return P.inst:call("get_Instance") end)
+          local ch = try(function() return P.inst:call("get_Chara") end)
+          P.hist[#P.hist + 1] = "[hook] +~3s instance GameObject=" ..
+            tostring(go) .. " Chara=" .. tostring(ch)
+        end
+      end
+      return
+    end
+    local ready = P.prefab and
+      try(function() return P.prefab:call("get_Ready") end)
+    if ready ~= true then
+      pcall(function() P.prefab:call("set_Standby", true) end)
+      return
+    end
+    P.fired = true
+    P.hist[#P.hist + 1] = "[hook] prefab READY in UpdateBehavior - firing"
+    local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+    local ok, err = pcall(function()
+      return gm:call("requestCreateInstance(app.PrefabController, app.GenerateInfo.GenerateInfoContainer, System.Int32, app.InstanceInfo, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>)",
+        P.pfbCtrl, P.cont, P.rid, P.inst, nil, nil)
+    end)
+    P.hist[#P.hist + 1] = "[hook] requestCreateInstance: ok=" .. tostring(ok) ..
+      (ok and "" or (" err=" .. tostring(err)))
+    P.ticks = 0
+  end)
+end
+
+COMMANDS.summon_probe23 = function()
+  local P = SUMMON.pool23
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool23 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe23.txt", text) then error("could not write summon_probe23.txt") end
+    return "summon_probe23: " .. tag
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("managers missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+
+  if P.fired then
+    local go = P.inst and try(function() return P.inst:call("get_Instance") end)
+    local ch = P.inst and try(function() return P.inst:call("get_Chara") end)
+    L("post-spawn read: instance GameObject=" .. tostring(go) ..
+      " Chara=" .. tostring(ch))
+    return flush("post-spawn read")
+  end
+  if P.armed then
+    L("still armed - the UpdateBehavior hook fires when the prefab is ready")
+    return flush("armed, waiting")
+  end
+
+  L("== summon_probe23 (bridge 1.89.67) == stage + arm UpdateBehavior hook")
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local chara = nil
+  for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+    if try(function() return f:is_static() end) and
+       try(function() return f:get_name() end) == "ch255000_00" then
+      chara = try(function() return f:get_data(nil) end)
+      break
+    end
+  end
+  if not chara then
+    L("ch255000_00 not resolvable")
+    return flush("no chara")
+  end
+  P.chara = chara
+  local cc = try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  local merged = ec and try(function() return ec:get_field("<MergedCatalog>k__BackingField") end)
+  local rc = merged and try(function() return merged:call("get_Item", chara) end)
+  local pfbCtrl = rc and try(function() return rc:call("get_Item") end)
+  if not pfbCtrl then
+    L("no prefab controller for ch255000_00 in merged catalog")
+    return flush("no prefab controller")
+  end
+  P.pfbCtrl = pfbCtrl
+  local prefab = try(function() return pfbCtrl:call("get_Item") end)
+  P.prefab = prefab
+  local inst = try(function() return sdk.create_instance("app.InstanceInfo"):add_ref() end)
+  local cont = inst and try(function() return inst:call("get_Container") end)
+  if not inst or not cont then
+    L("InstanceInfo/container creation failed")
+    return flush("no instanceinfo")
+  end
+  P.inst, P.cont = inst, cont
+  local robj = try(function() return sdk.create_instance("app.RequestID"):add_ref() end)
+  local rid = robj and try(function() return robj:call("makeNewRequestID") end)
+  P.rid = rid
+  local wrap = try(function() return gm:call("getIdWrapper", chara) end)
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local pgo = player and try(function() return player:call("get_GameObject") end)
+  local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+  local ppos = ptr and try(function() return ptr:call("get_Position") end)
+  local quat = ptr and try(function() return ptr:call("get_Rotation") end)
+  if not (ppos and quat) then
+    L("player transform unavailable")
+    return flush("no transform")
+  end
+  local fx, fz = 0.7071, 0.7071
+  local front = try(function() return cm:call("get_CameraFront") end)
+  if front and type(front.x) == "number" and type(front.z) == "number" then
+    local len = math.sqrt(front.x * front.x + front.z * front.z)
+    if len > 0.01 then fx, fz = front.x / len, front.z / len end
+  end
+  local spos = try(function() return Vector3f.new(ppos.x + fx * 5.0, ppos.y, ppos.z + fz * 5.0) end)
+  local ci = try(function() return cont:call("get_CommonInfo") end)
+  pcall(function() prefab:call("set_Standby", true) end)
+  if wrap then
+    pcall(function() ci:call("set_ObjectID", sdk.to_ptr(wrap)) end)
+  end
+  pcall(function() ci:call("setContextPosition", spos) end)
+  pcall(function() ci:call("setContextAngle", quat) end)
+  summon23_hook()
+  P.armed = true
+  L("staged and ARMED - the hook fires inside UpdateBehavior when ready.")
+  L("No more presses needed: wait ~10s, watch the spot, then press once")
+  L("more to collect the hook's log lines (marked [hook]).")
+  return flush("armed")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.34: summon probe step 24
+-- Step 23 fired inside UpdateBehavior: ok=true, instance still
+-- nil. The mod's hooks are logging/replacement-only, its charID
+-- values are the same enum userdata, so the recipe inputs match
+-- - except the POSITION. The mod sets ContextPosition from
+-- Character:get_LastGroundPosition() - a via.Position (universal,
+-- world-offset aware) - and the angle from the player's
+-- PosRotContext. Our probes passed a via.vec3 built from the
+-- transform. DD2 keeps a floating origin (WorldOffsetSystem
+-- exists to convert vec3 -> universal Position); a local vec3
+-- read as universal coordinates lands nowhere near the player.
+-- Step 24 = step 23's hook design + the mod's exact pos/rot
+-- sources, with the context position read back and logged.
+local function summon24_hook()
+  if SUMMON.hook24 then return end
+  SUMMON.hook24 = true
+  re.on_application_entry("UpdateBehavior", function()
+    local P = SUMMON.pool24
+    if not P or not P.armed then return end
+    if P.fired then
+      if not P.read then
+        P.ticks = (P.ticks or 0) + 1
+        if P.ticks >= 180 then
+          P.read = true
+          local go = try(function() return P.inst:call("get_Instance") end)
+          local ch = try(function() return P.inst:call("get_Chara") end)
+          P.hist[#P.hist + 1] = "[hook] +~3s instance GameObject=" ..
+            tostring(go) .. " Chara=" .. tostring(ch)
+        end
+      end
+      return
+    end
+    local ready = P.prefab and
+      try(function() return P.prefab:call("get_Ready") end)
+    if ready ~= true then
+      pcall(function() P.prefab:call("set_Standby", true) end)
+      return
+    end
+    P.fired = true
+    P.hist[#P.hist + 1] = "[hook] prefab READY in UpdateBehavior - firing"
+    local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+    local ok, err = pcall(function()
+      return gm:call("requestCreateInstance(app.PrefabController, app.GenerateInfo.GenerateInfoContainer, System.Int32, app.InstanceInfo, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>)",
+        P.pfbCtrl, P.cont, P.rid, P.inst, nil, nil)
+    end)
+    P.hist[#P.hist + 1] = "[hook] requestCreateInstance: ok=" .. tostring(ok) ..
+      (ok and "" or (" err=" .. tostring(err)))
+    P.ticks = 0
+  end)
+end
+
+COMMANDS.summon_probe24 = function()
+  local P = SUMMON.pool24
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool24 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe24.txt", text) then error("could not write summon_probe24.txt") end
+    return "summon_probe24: " .. tag
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  if not gm or not cm then
+    L("managers missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+
+  if P.fired then
+    local go = P.inst and try(function() return P.inst:call("get_Instance") end)
+    local ch = P.inst and try(function() return P.inst:call("get_Chara") end)
+    L("post-spawn read: instance GameObject=" .. tostring(go) ..
+      " Chara=" .. tostring(ch))
+    return flush("post-spawn read")
+  end
+  if P.armed then
+    L("still armed - the UpdateBehavior hook fires when the prefab is ready")
+    return flush("armed, waiting")
+  end
+
+  L("== summon_probe24 (bridge 1.89.67) == stage (universal position) + arm hook")
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local chara = nil
+  for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+    if try(function() return f:is_static() end) and
+       try(function() return f:get_name() end) == "ch255000_00" then
+      chara = try(function() return f:get_data(nil) end)
+      break
+    end
+  end
+  if not chara then
+    L("ch255000_00 not resolvable")
+    return flush("no chara")
+  end
+  P.chara = chara
+  local cc = try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  local merged = ec and try(function() return ec:get_field("<MergedCatalog>k__BackingField") end)
+  local rc = merged and try(function() return merged:call("get_Item", chara) end)
+  local pfbCtrl = rc and try(function() return rc:call("get_Item") end)
+  if not pfbCtrl then
+    L("no prefab controller for ch255000_00 in merged catalog")
+    return flush("no prefab controller")
+  end
+  P.pfbCtrl = pfbCtrl
+  local prefab = try(function() return pfbCtrl:call("get_Item") end)
+  P.prefab = prefab
+  local inst = try(function() return sdk.create_instance("app.InstanceInfo"):add_ref() end)
+  local cont = inst and try(function() return inst:call("get_Container") end)
+  if not inst or not cont then
+    L("InstanceInfo/container creation failed")
+    return flush("no instanceinfo")
+  end
+  P.inst, P.cont = inst, cont
+  local robj = try(function() return sdk.create_instance("app.RequestID"):add_ref() end)
+  local rid = robj and try(function() return robj:call("makeNewRequestID") end)
+  P.rid = rid
+  local wrap = try(function() return gm:call("getIdWrapper", chara) end)
+  -- The mod's exact transform sources.
+  local player = try(function() return cm:call("get_ManualPlayer") end)
+  local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+  local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+  local rot = prc and try(function() return prc:call("get_Rot") end)
+  if not rot then
+    local pgo = player and try(function() return player:call("get_GameObject") end)
+    local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+    rot = ptr and try(function() return ptr:call("get_Rotation") end)
+  end
+  L("LastGroundPosition = " .. tostring(gpos) ..
+    " (type " .. type(gpos) .. ")")
+  if gpos and type(gpos) == "userdata" then
+    L("  gpos fields: x=" .. tostring(try(function() return gpos.x end)) ..
+      " y=" .. tostring(try(function() return gpos.y end)) ..
+      " z=" .. tostring(try(function() return gpos.z end)))
+  end
+  if not (gpos and rot) then
+    L("ground position / rotation unavailable")
+    return flush("no transform")
+  end
+  local ci = try(function() return cont:call("get_CommonInfo") end)
+  pcall(function() prefab:call("set_Standby", true) end)
+  if wrap then
+    pcall(function() ci:call("set_ObjectID", sdk.to_ptr(wrap)) end)
+  end
+  local okP, eP = pcall(function() ci:call("setContextPosition", gpos) end)
+  local okA, eA = pcall(function() ci:call("setContextAngle", rot) end)
+  L("setContextPosition(universal)=" .. tostring(okP) ..
+    " setContextAngle(PosRot)=" .. tostring(okA))
+  if not (okP and okA) then
+    L("  errors: " .. tostring(eP) .. " | " .. tostring(eA))
+  end
+  local back = ci and try(function() return ci:call("get_ContextPosition") end)
+  L("context position read-back = " .. tostring(back))
+  summon24_hook()
+  P.armed = true
+  L("staged and ARMED - hook fires in UpdateBehavior when ready.")
+  L("Wait ~10s, watch your feet (spawns AT your ground position),")
+  L("then press once more to collect the [hook] lines.")
+  return flush("armed")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.35: summon probe step 25
+-- The reference recipe is DEAD on TU4 - the user ran the
+-- original Enemy Spawner standalone and it does not work in
+-- this game version either. So back to Route G (the game's own
+-- generate queue), which DID produce a queued controller in
+-- steps 16/17 - with one input wrong the whole time: the
+-- factory getPoolGenerateInfoContainerForCharacter takes a
+-- via.Position (universal), and every Route G attempt fed it a
+-- via.vec3 (local). Step 25 feeds get_LastGroundPosition()
+-- directly, sets the context position/angle from the same
+-- universal sources, keeps pooled ID + LoadArea=6, waits for
+-- the prefab to go valid, fires requestGenerate ONCE, and
+-- snapshots the controller IN THE SAME CALL (no cross-press
+-- polling - queued controllers are perishable).
+COMMANDS.summon_probe25 = function()
+  local P = SUMMON.pool25
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool25 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe25.txt", text) then error("could not write summon_probe25.txt") end
+    return "summon_probe25: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end)
+  end
+
+  if P.done then
+    L("already fired this session - use Verify / watch the spot")
+    return flush("already done")
+  end
+
+  if not P.cont then
+    L("== summon_probe25 (bridge 1.89.67) == build (factory + universal Position)")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+    local rot = prc and try(function() return prc:call("get_Rot") end)
+    if not rot then
+      local pgo = player and try(function() return player:call("get_GameObject") end)
+      local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+      rot = ptr and try(function() return ptr:call("get_Rotation") end)
+    end
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and gpos and rot and scale) then
+      L("missing pieces at build (chara/gpos/rot/scale)")
+      return flush("missing pieces")
+    end
+    L("universal ground pos = " .. tostring(gpos))
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      local okF, resF = pcall(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, gpos, rot, scale, 3, 0, chara, 1)
+      end)
+      L("factory call ok=" .. tostring(okF) ..
+        (okF and "" or (" err=" .. tostring(resF))))
+      if okF then cont = resF end
+    end
+    if not cont then
+      L("factory container build failed")
+      return flush("build failed")
+    end
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    local okP, eP = pcall(function() ci:call("setContextPosition", gpos) end)
+    local okA, eA = pcall(function() ci:call("setContextAngle", rot) end)
+    L("setContextPosition(universal)=" .. tostring(okP) ..
+      " setContextAngle=" .. tostring(okA) ..
+      ((okP and okA) and "" or (" errs: " .. tostring(eP) .. " | " .. tostring(eA))))
+    local td = try(function() return cont:get_type_definition() end)
+    local setter = nil
+    for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+      local nm = tostring(try(function() return m:get_name() end) or "")
+      if nm:lower():find("loadarea") and nm:lower():find("set") then setter = nm break end
+    end
+    if setter then
+      pcall(function() cont:call(setter, 6) end)
+      L("LoadArea=6 via " .. setter)
+    else
+      L("no LoadArea setter found on container")
+    end
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara, P.ci = cont, uniqID, chara, ci
+    L("standby started - press probe step 25 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if prefab_valid() ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    if P.ci then pcall(function() cc:call("requestStandbyPrefab", P.ci) end) end
+    L("loading: prefab not valid yet - standby re-requested")
+    return flush("still loading")
+  end
+
+  L("prefab VALID - firing requestGenerate once (universal-Position container)")
+  local cb = function() end
+  local okG, ctrl = pcall(function()
+    return gm:call("requestGenerate", P.cont, 8 + 35184372088832, false, false, cb, cb)
+  end)
+  L("requestGenerate ok=" .. tostring(okG) .. " -> " .. tostring(ctrl) ..
+    (okG and "" or (" err=" .. tostring(ctrl))))
+  if okG and ctrl then
+    local pos = try(function() return ctrl:call("get_Position") end)
+    L("SNAPSHOT ctrl: generated=" ..
+      tostring(try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " state=" ..
+      tostring(try(function() return ctrl:call("get_RequestState") end)) ..
+      " pos=" .. tostring(pos) ..
+      " inRange=" ..
+      tostring(try(function() return ctrl:call("get_IsInGenerateRangeForReserveDistributorUnit") end)) ..
+      " fixPos=" ..
+      tostring(try(function() return ctrl:call("get_IsFixGeneratePosition") end)))
+    if pos and type(pos) == "userdata" then
+      L("  ctrl pos fields: x=" .. tostring(try(function() return pos.x end)) ..
+        " y=" .. tostring(try(function() return pos.y end)) ..
+        " z=" .. tostring(try(function() return pos.z end)))
+    end
+    SUMMON.ctrl = ctrl
+  else
+    local fc = try(function()
+      return gm:call("forceRequestCreateInstance", P.cont, cb, cb)
+    end)
+    L("force fallback = " .. tostring(fc))
+  end
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.fired = true
+  P.done = true
+  L("fired. Snapshot pos ~= your ground pos + inRange=true means the")
+  L("distributor can claim it: watch the spot, ONE Verify in ~15s.")
+  L("If pos is garbage again, restart promptly to clear the queue.")
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.36: summon probe step 26
+-- Probe 25 SPAWNED the monster (controller position read real
+-- universal coordinates once the factory got a via.Position) -
+-- but inert: not targetable, no AI, no combat either way. The
+-- character generated without its activation setup. Two
+-- documented activation levers were not used: InitSetType
+-- "Summon" (the enum literally has one for this) and the
+-- EnableForceCombat generate flag. Step 26 = step 25's recipe
+-- with ONLY those two changed: init set resolved by name
+-- (Summon, fallback Auto, fallback Common) and flags
+-- OverrideContextPosition + EnableForceCombat +
+-- DisableSaveRequestToSaveData.
+COMMANDS.summon_probe26 = function()
+  local P = SUMMON.pool26
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool26 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe26.txt", text) then error("could not write summon_probe26.txt") end
+    return "summon_probe26: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end)
+  end
+
+  if P.done then
+    L("already fired this session - use Verify / watch the spot")
+    return flush("already done")
+  end
+
+  if not P.cont then
+    L("== summon_probe26 (bridge 1.89.67) == build (factory + universal Position)")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+    local rot = prc and try(function() return prc:call("get_Rot") end)
+    if not rot then
+      local pgo = player and try(function() return player:call("get_GameObject") end)
+      local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+      rot = ptr and try(function() return ptr:call("get_Rotation") end)
+    end
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and gpos and rot and scale) then
+      L("missing pieces at build (chara/gpos/rot/scale)")
+      return flush("missing pieces")
+    end
+    L("universal ground pos = " .. tostring(gpos))
+    local itd = try(function() return sdk.find_type_definition("app.GenerateDefine.InitSetTypeEnum") end)
+    local initset, initname = 1, "Common(fallback)"
+    for _, want in ipairs({ "Summon", "Auto" }) do
+      local found = nil
+      for _, f in ipairs(itd and try(function() return itd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) and
+           try(function() return f:get_name() end) == want then
+          found = try(function() return f:get_data(nil) end)
+          break
+        end
+      end
+      if found ~= nil then initset, initname = found, want break end
+    end
+    L("init set: " .. initname .. " = " .. tostring(initset))
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      local okF, resF = pcall(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, gpos, rot, scale, 3, 0, chara, initset)
+      end)
+      L("factory call ok=" .. tostring(okF) ..
+        (okF and "" or (" err=" .. tostring(resF))))
+      if okF then cont = resF end
+    end
+    if not cont then
+      L("factory container build failed")
+      return flush("build failed")
+    end
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    local okP, eP = pcall(function() ci:call("setContextPosition", gpos) end)
+    local okA, eA = pcall(function() ci:call("setContextAngle", rot) end)
+    L("setContextPosition(universal)=" .. tostring(okP) ..
+      " setContextAngle=" .. tostring(okA) ..
+      ((okP and okA) and "" or (" errs: " .. tostring(eP) .. " | " .. tostring(eA))))
+    local td = try(function() return cont:get_type_definition() end)
+    local setter = nil
+    for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+      local nm = tostring(try(function() return m:get_name() end) or "")
+      if nm:lower():find("loadarea") and nm:lower():find("set") then setter = nm break end
+    end
+    if setter then
+      pcall(function() cont:call(setter, 6) end)
+      L("LoadArea=6 via " .. setter)
+    else
+      L("no LoadArea setter found on container")
+    end
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara, P.ci = cont, uniqID, chara, ci
+    L("standby started - press probe step 26 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if prefab_valid() ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    if P.ci then pcall(function() cc:call("requestStandbyPrefab", P.ci) end) end
+    L("loading: prefab not valid yet - standby re-requested")
+    return flush("still loading")
+  end
+
+  L("prefab VALID - firing requestGenerate once (Summon init + force combat)")
+  local cb = function() end
+  local okG, ctrl = pcall(function()
+    return gm:call("requestGenerate", P.cont, 8 + 131072 + 35184372088832, false, false, cb, cb)
+  end)
+  L("requestGenerate ok=" .. tostring(okG) .. " -> " .. tostring(ctrl) ..
+    (okG and "" or (" err=" .. tostring(ctrl))))
+  if okG and ctrl then
+    local pos = try(function() return ctrl:call("get_Position") end)
+    L("SNAPSHOT ctrl: generated=" ..
+      tostring(try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " state=" ..
+      tostring(try(function() return ctrl:call("get_RequestState") end)) ..
+      " pos=" .. tostring(pos) ..
+      " inRange=" ..
+      tostring(try(function() return ctrl:call("get_IsInGenerateRangeForReserveDistributorUnit") end)) ..
+      " fixPos=" ..
+      tostring(try(function() return ctrl:call("get_IsFixGeneratePosition") end)))
+    if pos and type(pos) == "userdata" then
+      L("  ctrl pos fields: x=" .. tostring(try(function() return pos.x end)) ..
+        " y=" .. tostring(try(function() return pos.y end)) ..
+        " z=" .. tostring(try(function() return pos.z end)))
+    end
+    SUMMON.ctrl = ctrl
+  else
+    local fc = try(function()
+      return gm:call("forceRequestCreateInstance", P.cont, cb, cb)
+    end)
+    L("force fallback = " .. tostring(fc))
+  end
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.fired = true
+  P.done = true
+  L("fired. Snapshot pos ~= your ground pos + inRange=true means the")
+  L("distributor can claim it: watch the spot, ONE Verify in ~15s.")
+  L("If pos is garbage again, restart promptly to clear the queue.")
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.37: summon probe step 27
+-- Step 26 verdict: InitSet=Summon + force combat is WORSE -
+-- still untargetable and the game crashes ~10s after the
+-- summon (the Summon init path starts a setup that faults
+-- without its expected context). NEVER use Summon init again.
+-- Step 25's recipe (Common init, base flags) is stable but the
+-- monster is inert. Step 27 spawns with step 25's exact recipe,
+-- then INSPECTS instead of guessing: it finds the generated
+-- character (via the controller once generated, else via the
+-- CharacterManager's character list), reads its think / hit /
+-- target state, does the same for a NATURAL enemy of any kind
+-- for comparison, and - if the summoned one is think-stopped
+-- while the natural one is not - clears think-stop on the
+-- character and reports (watch whether it wakes up).
+COMMANDS.summon_probe27 = function()
+  local P = SUMMON.pool27
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool27 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 600 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe27.txt", text) then error("could not write summon_probe27.txt") end
+    return "summon_probe27: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end)
+  end
+  -- Dump think/hit/target-flavored state off a character object.
+  local function dump_chara(ch, label)
+    if not ch then
+      L(label .. ": (none)")
+      return
+    end
+    L(label .. ": charaID=" ..
+      tostring(try(function() return ch:call("get_CharaID") end)))
+    local td = try(function() return ch:get_type_definition() end)
+    local ms = td and try(function() return td:get_methods() end)
+    local seen = {}
+    for _, m in ipairs(ms or {}) do
+      local nm = tostring(try(function() return m:get_name() end) or "")
+      local low = nm:lower()
+      if not seen[nm] and nm:sub(1, 4) == "get_" and
+         (low:find("think") or low:find("hit") or low:find("target") or
+          low:find("active") or low:find("setup") or low:find("sleep") or
+          low:find("combat") or low:find("alive") or low:find("dead")) then
+        seen[nm] = true
+        local v = try(function() return ch:call(nm) end)
+        if v ~= nil and type(v) ~= "table" then
+          L("  " .. nm .. " = " .. tostring(v))
+        end
+      end
+    end
+    -- Common field-style state, if present.
+    for _, fn in ipairs({ "_IsThinkStop", "IsThinkStop", "_ThinkStop" }) do
+      local v = try(function() return ch:get_field(fn) end)
+      if v ~= nil then L("  field " .. fn .. " = " .. tostring(v)) end
+    end
+  end
+  local function chara_list()
+    -- Find a List-like field on CharacterManager holding characters.
+    local td = try(function() return cm:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local fn = try(function() return f:get_name() end)
+      local v = fn and try(function() return cm:get_field(fn) end)
+      local n = v and arr_len(v)
+      if n and n > 0 and n < 500 then
+        local first = arr_get(v, 0)
+        if first and try(function() return first:call("get_CharaID") end) ~= nil then
+          return v, fn
+        end
+      end
+    end
+    return nil, nil
+  end
+
+  if P.inspected then
+    L("already inspected this spawn - see above")
+    return flush("already inspected")
+  end
+
+  if not P.cont then
+    L("== summon_probe27 (bridge 1.89.67) == build (probe 25 recipe, stable)")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+    local rot = prc and try(function() return prc:call("get_Rot") end)
+    if not rot then
+      local pgo = player and try(function() return player:call("get_GameObject") end)
+      local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+      rot = ptr and try(function() return ptr:call("get_Rotation") end)
+    end
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and gpos and rot and scale) then
+      L("missing pieces at build")
+      return flush("missing pieces")
+    end
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      cont = try(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, gpos, rot, scale, 3, 0, chara, 1)
+      end)
+    end
+    if not cont then
+      L("factory container build failed")
+      return flush("build failed")
+    end
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    pcall(function() ci:call("setContextPosition", gpos) end)
+    pcall(function() ci:call("setContextAngle", rot) end)
+    local chi = try(function() return cont:call("get_CharaInfo") end)
+    L("container CharaInfo _IsThinkStop = " ..
+      tostring(chi and try(function() return chi:get_field("_IsThinkStop") end)))
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara = cont, uniqID, chara
+    L("standby started - press probe step 27 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if not P.fired then
+    if prefab_valid() ~= true then
+      pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+      L("loading: prefab not valid yet - standby re-requested")
+      return flush("still loading")
+    end
+    L("prefab VALID - firing requestGenerate once (Common, base flags)")
+    local cb = function() end
+    local okG, ctrl = pcall(function()
+      return gm:call("requestGenerate", P.cont, 8 + 35184372088832, false, false, cb, cb)
+    end)
+    L("requestGenerate ok=" .. tostring(okG) .. " -> " .. tostring(ctrl) ..
+      (okG and "" or (" err=" .. tostring(ctrl))))
+    if okG and ctrl then SUMMON.ctrl = ctrl P.ctrl = ctrl end
+    SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+      P.cont, "ch255000_00", P.chara, P.uniq
+    SUMMON.fired = true
+    P.fired = true
+    L("fired - let it appear, then press probe step 27 for the inspection")
+    return flush("fired")
+  end
+
+  -- Inspection stage.
+  L("== inspection ==")
+  local gen = P.ctrl and try(function() return P.ctrl:call("get_IsGenerated") end)
+  L("controller generated=" .. tostring(gen))
+  local mine, natural = nil, nil
+  local list, lname = chara_list()
+  L("character list field: " .. tostring(lname) ..
+    " count=" .. tostring(list and arr_len(list)))
+  if list then
+    local n = arr_len(list)
+    for i = 0, n - 1 do
+      local ch = arr_get(list, i)
+      local id = ch and try(function() return ch:call("get_CharaID") end)
+      local nm = id and try(function() return id:call("ToString") end)
+      if nm == "ch255000_00" and not mine then mine = ch end
+      if nm and nm ~= "ch255000_00" and nm:sub(1, 2) == "ch"
+         and not natural then natural = ch end
+      if mine and natural then break end
+    end
+  end
+  dump_chara(mine, "SUMMONED")
+  dump_chara(natural, "NATURAL (first other)")
+  -- The one guarded fix attempt: think-stop on the summoned character.
+  if mine then
+    local before = try(function() return mine:get_field("_IsThinkStop") end)
+    if before == nil then
+      before = try(function() return mine:call("get_IsThinkStop") end)
+    end
+    L("summoned think-stop reads: " .. tostring(before))
+    if before == true then
+      local okW = pcall(function() mine:set_field("_IsThinkStop", false) end)
+      L("set _IsThinkStop=false on character: " .. tostring(okW) ..
+        " - WATCH IT: does it wake up?")
+    end
+  end
+  P.inspected = true
+  return flush("inspection complete")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.38: summon probe step 28
+-- STOP FIRING, START WATCHING. The spawn fire is unstable
+-- across sessions (step 25 stable-inert, step 26 delayed
+-- crash, step 27 crashed at the fire press) - our shortcut
+-- skips whatever bookkeeping the natural pipeline does first.
+-- Step 28 makes NO spawn calls. It installs passive logging
+-- hooks on the GenerateManager's spawn entry points (the
+-- reference mod hooks two of these permanently, safely) and
+-- records the GAME'S OWN natural-spawn calls: which method,
+-- which character, and the container state the game itself
+-- builds (ObjectID, think-stop, load area). Walk into a fresh
+-- area where enemies generate and the log fills; diffing a
+-- natural container against our factory container names the
+-- missing piece instead of guessing it.
+local function summon28_log(line)
+  local O = SUMMON.obs28
+  if not O then return end
+  O.hist[#O.hist + 1] = line
+  if #O.hist > 600 then table.remove(O.hist, 1) end
+  wr(DIR .. "summon_probe28.txt", table.concat(O.hist, "\n"))
+end
+
+local function summon28_describe(tag, cont)
+  if not cont then
+    summon28_log(tag .. ": container=nil")
+    return
+  end
+  local ci = try(function() return cont:call("get_CommonInfo") end)
+  local chi = try(function() return cont:call("get_CharaInfo") end)
+  local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+  local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+  summon28_log(tag .. ": chara=" .. tostring(sel) ..
+    " thinkStop=" ..
+    tostring(chi and try(function() return chi:get_field("_IsThinkStop") end)) ..
+    " loadArea=" ..
+    tostring(ci and try(function() return ci:call("get_LoadArea") end)))
+end
+
+local function summon28_install()
+  if SUMMON.obs28 then return end
+  SUMMON.obs28 = { hist = {}, n = 0 }
+  local td = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  if not td then
+    summon28_log("GenerateManager type not found - hooks NOT installed")
+    return
+  end
+  local function hook(name, sig, describe_idx)
+    local m = try(function()
+      if sig then return td:get_method(sig) end
+      return td:get_method(name)
+    end)
+    if not m then
+      summon28_log("hook target missing: " .. name)
+      return
+    end
+    local ok = pcall(function()
+      sdk.hook(m, function(args)
+        SUMMON.obs28.n = SUMMON.obs28.n + 1
+        local cont = describe_idx and
+          try(function() return sdk.to_managed_object(args[describe_idx]) end)
+        summon28_describe("[call #" .. SUMMON.obs28.n .. "] " .. name, cont)
+      end, function(retval)
+        return retval
+      end)
+    end)
+    summon28_log("hook installed (" .. name .. "): " .. tostring(ok))
+  end
+  summon28_log("== summon_probe28 (bridge 1.89.67) == hooks")
+  -- requestGenerate(GenerateInfoContainer, flags, bool, bool, cb, cb):
+  -- args[3] = container.
+  hook("requestGenerate", nil, 3)
+  -- requestCreateInstance overload 1 (InstanceInfo): args[4] = container.
+  hook("requestCreateInstance",
+    "requestCreateInstance(app.PrefabController, app.GenerateInfo.GenerateInfoContainer, System.Int32, app.InstanceInfo, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>)", 4)
+  -- requestCreateInstance overload 2 (category): args[5] = container.
+  hook("requestCreateInstance",
+    "requestCreateInstance(app.GeneratorCategory, app.PrefabController, app.GenerateInfo.GenerateInfoContainer, System.Int32, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>, System.Action`2<app.PrefabInstantiateResults,app.DummyArg>)", 5)
+  hook("forceRequestCreateInstance", nil, 3)
+end
+
+COMMANDS.summon_probe28 = function()
+  summon28_install()
+  local O = SUMMON.obs28
+  local n = O and O.n or 0
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe28.txt", text) then error("could not write summon_probe28.txt") end
+  return "summon_probe28: hooks live, " .. n ..
+    " natural spawn call(s) captured so far"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.39: summon probe step 29
+-- Step 28 proved natural spawns DO flow through
+-- requestGenerate - thousands of retry calls as the player
+-- moves. But it logged only 3 fields per call and flooded.
+-- Step 29 dedupes: the FIRST time each natural container is
+-- seen, it dumps everything once - the flags and bool params
+-- the game passes, plus full field lists of the container's
+-- CommonInfo / CharaInfo / StatusInfo / GeneratorID. Diffing
+-- one of these against our factory container (which produces
+-- inert monsters) names the missing state exactly.
+local function summon29_install()
+  if SUMMON.obs29 then return end
+  local O = { hist = {}, seen = {}, dumped = 0, calls = 0 }
+  SUMMON.obs29 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 800 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe29.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe29 (bridge 1.89.67) == natural container deep-dump")
+  -- number -> name map for CharacterID values.
+  local namemap = {}
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+    if try(function() return f:is_static() end) then
+      local v = try(function() return f:get_data(nil) end)
+      local n = v and try(function() return sdk.to_int64(v) end)
+      if n then namemap[n] = try(function() return f:get_name() end) end
+    end
+  end
+  L("charID name map: " .. tostring(#O.hist) .. " lines so far")
+  local function dump_fields(obj, label, maxn)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local td = try(function() return obj:get_type_definition() end)
+    local fields = td and try(function() return td:get_fields() end)
+    if not fields then
+      L("  " .. label .. ": (no fields)")
+      return
+    end
+    local out = {}
+    for _, f in ipairs(fields) do
+      if #out >= (maxn or 40) then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          out[#out + 1] = fn .. "=" .. tostring(v)
+        elseif tv == "userdata" then
+          local iv = try(function() return sdk.to_int64(v) end)
+          if iv ~= nil and iv > -100000 and iv < 5000000000 then
+            out[#out + 1] = fn .. "=" .. tostring(iv)
+          else
+            out[#out + 1] = fn .. "=<obj>"
+          end
+        end
+      end
+    end
+    L("  " .. label .. ": " .. table.concat(out, " "))
+  end
+  local td = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = td and try(function() return td:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.dumped >= 12 then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local key = tostring(cont)
+      if O.seen[key] then return end
+      O.seen[key] = true
+      O.dumped = O.dumped + 1
+      local flags = try(function() return sdk.to_int64(args[4]) end)
+      local b1 = try(function() return sdk.to_int64(args[5]) end)
+      local b2 = try(function() return sdk.to_int64(args[6]) end)
+      L("[container #" .. O.dumped .. "] flags=" .. tostring(flags) ..
+        " bool1=" .. tostring(b1) .. " bool2=" .. tostring(b2))
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local chi = try(function() return cont:call("get_CharaInfo") end)
+      local sti = try(function() return cont:call("get_StatusInfo") end)
+      local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+      local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+      local seln = sel and try(function() return sdk.to_int64(sel) end)
+      L("  chara: " .. tostring(seln) .. " = " ..
+        tostring(seln and namemap[seln]))
+      dump_fields(ci, "CommonInfo", 40)
+      dump_fields(chi, "CharaInfo", 40)
+      dump_fields(sti, "StatusInfo", 30)
+      local gid = ci and (try(function() return ci:call("get_GeneratorID") end)
+        or try(function() return ci:get_field("_GeneratorID") end))
+      dump_fields(gid, "GeneratorID", 12)
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+COMMANDS.summon_probe29 = function()
+  summon29_install()
+  local O = SUMMON.obs29
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe29.txt", text) then error("could not write summon_probe29.txt") end
+  return "summon_probe29: " .. tostring(O and O.calls or 0) ..
+    " requestGenerate calls seen, " .. tostring(O and O.dumped or 0) ..
+    " containers dumped"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.40: summon probe step 30
+-- Step 29's natural-container dumps gave the systematic
+-- diff. Natural field monsters: InitSetType = 2 ("Wait") in
+-- 11 of 12 dumps, and generate flags dominated by 2^21
+-- (2097152) plus small bits - 2097168 (2^21 + 16) is the most
+-- common Monster pattern. Our factory containers used
+-- Common (1) and flags 8 + 2^35 - neither appears in any
+-- natural call. Everything else (category, requestType,
+-- GenerateDisableFlag, status ID, rates) already matches.
+-- Step 30 = step 25's stable recipe (pooled factory
+-- container, universal ground position, context set,
+-- standby-to-valid, single fire) with ONLY those two scalars
+-- changed to the natural values.
+COMMANDS.summon_probe30 = function()
+  local P = SUMMON.pool30
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool30 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe30.txt", text) then error("could not write summon_probe30.txt") end
+    return "summon_probe30: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end)
+  end
+
+  if P.done then
+    L("already fired this session - use Verify / watch the spot")
+    return flush("already done")
+  end
+
+  if not P.cont then
+    L("== summon_probe30 (bridge 1.89.67) == build (natural scalars)")
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+    local rot = prc and try(function() return prc:call("get_Rot") end)
+    if not rot then
+      local pgo = player and try(function() return player:call("get_GameObject") end)
+      local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+      rot = ptr and try(function() return ptr:call("get_Rotation") end)
+    end
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and gpos and rot and scale) then
+      L("missing pieces at build (chara/gpos/rot/scale)")
+      return flush("missing pieces")
+    end
+    local itd = try(function() return sdk.find_type_definition("app.GenerateDefine.InitSetTypeEnum") end)
+    local initset = 2
+    for _, f in ipairs(itd and try(function() return itd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "Wait" then
+        initset = try(function() return f:get_data(nil) end) or 2
+        break
+      end
+    end
+    L("init set: Wait = " .. tostring(initset))
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      local okF, resF = pcall(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, gpos, rot, scale, 3, 0, chara, initset)
+      end)
+      L("factory call ok=" .. tostring(okF) ..
+        (okF and "" or (" err=" .. tostring(resF))))
+      if okF then cont = resF end
+    end
+    if not cont then
+      L("factory container build failed")
+      return flush("build failed")
+    end
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    pcall(function() ci:call("setContextPosition", gpos) end)
+    pcall(function() ci:call("setContextAngle", rot) end)
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara = cont, uniqID, chara
+    L("standby started - press probe step 30 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if prefab_valid() ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    L("loading: prefab not valid yet - standby re-requested")
+    return flush("still loading")
+  end
+
+  L("prefab VALID - firing requestGenerate once (Wait init, natural flags 2097168)")
+  local cb = function() end
+  local okG, ctrl = pcall(function()
+    return gm:call("requestGenerate", P.cont, 2097168, false, false, cb, cb)
+  end)
+  L("requestGenerate ok=" .. tostring(okG) .. " -> " .. tostring(ctrl) ..
+    (okG and "" or (" err=" .. tostring(ctrl))))
+  if okG and ctrl then
+    local pos = try(function() return ctrl:call("get_Position") end)
+    L("SNAPSHOT ctrl: generated=" ..
+      tostring(try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " state=" ..
+      tostring(try(function() return ctrl:call("get_RequestState") end)) ..
+      " pos=" .. tostring(pos))
+    SUMMON.ctrl = ctrl
+  end
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.fired = true
+  P.done = true
+  L("fired - watch it: targetable? does it move/attack? can you hit it?")
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.41: summon probe step 31
+-- Steps 29-30 settled the scalars: natural InitSetType and
+-- generate flags are now matched, and the summoned Medusa
+-- still stands inert - while pawns perceive and name it.
+-- The character exists; its activation setup never runs.
+-- Remaining suspect: provenance. Natural containers carry a
+-- real table-backed GeneratorID (its _TableID is an object)
+-- and a _CustomGeneratorID; ours are pooled/minted shells.
+-- Step 31 captures up to 3 live natural Monster containers
+-- (via the requestGenerate hook) and dumps the provenance
+-- graph: _TableID and _CustomGeneratorID subfields, the
+-- _RequestID pair, and the container's own fields - plus
+-- existence checks for the table API (getTable /
+-- requestGenerateTable / getSelector / getTableListNum /
+-- getTableMax). Observation only; fires nothing.
+local function sp31_install()
+  if SUMMON.obs31 then return end
+  local O = { hist = {}, stash = {}, calls = 0 }
+  SUMMON.obs31 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 900 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe31.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe31 (bridge 1.89.67) == natural container provenance")
+  local td = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = td and try(function() return td:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if #O.stash >= 3 then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      for _, c in ipairs(O.stash) do
+        if tostring(c) == tostring(cont) then return end
+      end
+      O.stash[#O.stash + 1] = cont
+      L("captured natural Monster container #" .. #O.stash)
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+local function sp31_dump()
+  local O = SUMMON.obs31
+  local L = O.log
+  local function dump_fields(obj, label, depth)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local td = try(function() return obj:get_type_definition() end)
+    local fields = td and try(function() return td:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(td and try(function() return td:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= 36 then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        elseif tv == "userdata" then
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+          if (depth or 0) > 0 and
+             (fn:find("TableID") or fn:find("GeneratorID") or
+              fn:find("RequestID") or fn:find("ObjectID") or
+              fn:find("GenID") or fn:find("UniqID")) then
+            dump_fields(v, label .. "." .. fn, (depth or 0) - 1)
+          end
+        end
+      end
+    end
+  end
+  -- Table API existence on the GenerateManager type.
+  local td = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local names = { "getTable", "requestGenerateTable", "getSelector",
+                  "getTableListNum", "getTableMax", "getRegenerateTableMax",
+                  "createGenerateTable", "registGenerateTable" }
+  local found = {}
+  for _, nm in ipairs(names) do
+    if td and try(function() return td:get_method(nm) end) then
+      found[#found + 1] = nm
+    end
+  end
+  L("table API present: " .. table.concat(found, ", "))
+  L("containers captured: " .. #O.stash ..
+    " (requestGenerate calls seen: " .. O.calls .. ")")
+  for i, cont in ipairs(O.stash) do
+    L("[natural container #" .. i .. "]")
+    dump_fields(cont, "container", 0)
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    dump_fields(ci, "CommonInfo", 2)
+  end
+end
+
+COMMANDS.summon_probe31 = function()
+  sp31_install()
+  local O = SUMMON.obs31
+  if O and #O.stash > 0 then sp31_dump() end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe31.txt", text) then error("could not write summon_probe31.txt") end
+  return "summon_probe31: " .. tostring(O and O.calls or 0) ..
+    " calls seen, " .. tostring(O and #O.stash or 0) .. " containers captured"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.42: summon probe step 32
+-- Step 31 found the table API (getTable and
+-- requestGenerateTable exist on GenerateManager) but its
+-- dump read "(nil)" for everything: the captured natural
+-- containers are POOLED and recycled - by the second press
+-- the stashed references point at dead objects. All
+-- inspection must happen inside the hook, at capture time
+-- (that is how steps 28/29 got their data). Step 32 does
+-- exactly that: at first sight of each of the first 3
+-- natural Monster containers, it dumps the full provenance
+-- graph in-hook - container fields, CommonInfo with
+-- recursion into the table/generator/request/object ID
+-- sub-objects, CharaInfo and StatusInfo. Observation only.
+local function sp32_install()
+  if SUMMON.obs32 then return end
+  local O = { hist = {}, seen = {}, dumped = 0, calls = 0 }
+  SUMMON.obs32 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe32.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe32 (bridge 1.89.67) == in-hook provenance dump")
+  local td = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local names = { "getTable", "requestGenerateTable", "getSelector",
+                  "getTableListNum", "getTableMax", "getRegenerateTableMax",
+                  "createGenerateTable", "registGenerateTable" }
+  local found = {}
+  for _, nm in ipairs(names) do
+    if td and try(function() return td:get_method(nm) end) then
+      found[#found + 1] = nm
+    end
+  end
+  L("table API present: " .. table.concat(found, ", "))
+  local function dump_fields(obj, label, depth)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local otd = try(function() return obj:get_type_definition() end)
+    local fields = otd and try(function() return otd:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(otd and try(function() return otd:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= 36 then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        elseif tv == "userdata" then
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+          if (depth or 0) > 0 and
+             (fn:find("TableID") or fn:find("GeneratorID") or
+              fn:find("RequestID") or fn:find("ObjectID") or
+              fn:find("GenID") or fn:find("UniqID")) then
+            dump_fields(v, label .. "." .. fn, (depth or 0) - 1)
+          end
+        end
+      end
+    end
+  end
+  local m = td and try(function() return td:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.dumped >= 3 then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local key = tostring(cont)
+      if O.seen[key] then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.seen[key] = true
+      O.dumped = O.dumped + 1
+      L("[natural Monster container #" .. O.dumped .. "]")
+      dump_fields(cont, "container", 0)
+      dump_fields(ci, "CommonInfo", 2)
+      dump_fields(try(function() return cont:call("get_CharaInfo") end),
+        "CharaInfo", 0)
+      dump_fields(try(function() return cont:call("get_StatusInfo") end),
+        "StatusInfo", 0)
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+COMMANDS.summon_probe32 = function()
+  sp32_install()
+  local O = SUMMON.obs32
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe32.txt", text) then error("could not write summon_probe32.txt") end
+  return "summon_probe32: " .. tostring(O and O.calls or 0) ..
+    " calls seen, " .. tostring(O and O.dumped or 0) .. " containers dumped"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.43: summon probe step 33
+-- Step 32's provenance dumps cleared the ID theory: natural
+-- containers' custom GeneratorID wraps an EMPTY Guid - there
+-- is no magic table identity to steal. What IS row-specific
+-- in natural containers: the InitSetType (207 / 30 / 2 across
+-- three monsters of two species), the flags, priorities and
+-- scale. The init set is the activation suspect: it plausibly
+-- selects the character's own setup routine, and we have
+-- only ever fired generic ones (Common, Wait, and the banned
+-- Summon). Natural species carry species init sets.
+-- Step 33 enumerates every InitSetTypeEnum member named for
+-- family 255, picks the family/variant one, and fires step
+-- 25's recipe with it (flags back to 8, a value a natural
+-- wandering field monster in step 32 used). One variable:
+-- the init set.
+COMMANDS.summon_probe33 = function()
+  local P = SUMMON.pool33
+  if not P then
+    P = { hist = {} }
+    SUMMON.pool33 = P
+  end
+  local function L(x)
+    P.hist[#P.hist + 1] = x
+    if #P.hist > 500 then table.remove(P.hist, 1) end
+  end
+  local function flush(tag)
+    local text = table.concat(P.hist, "\n")
+    if not wr(DIR .. "summon_probe33.txt", text) then error("could not write summon_probe33.txt") end
+    return "summon_probe33: " .. tag
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+  local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+  if not gm or not cm or not ec then
+    L("managers or enemy catalog missing - not loaded into the world?")
+    return flush("managers missing")
+  end
+  local function find_ctrl(want)
+    local keys = try(function() return ec:call("getKeys") end)
+    local vals = try(function() return ec:call("getValues") end)
+    local nk, nv = arr_len(keys), arr_len(vals)
+    if not (keys and vals and nk and nv) then return nil end
+    local n = math.min(nk, nv)
+    for i = 0, n - 1 do
+      local k = arr_get(keys, i)
+      local nm = k and try(function() return k:call("ToString") end)
+      if nm == want then return arr_get(vals, i) end
+    end
+    return nil
+  end
+  local function prefab_valid()
+    local pc = find_ctrl("ch255000_00")
+    local item = pc and try(function() return pc:get_field("_Item") end)
+    return item and try(function() return item:call("get_Valid") end)
+  end
+
+  if P.done then
+    L("already fired this session - use Verify / watch the spot")
+    return flush("already done")
+  end
+
+  if not P.cont then
+    L("== summon_probe33 (bridge 1.89.67) == build (species init set)")
+    local itd = try(function() return sdk.find_type_definition("app.GenerateDefine.InitSetTypeEnum") end)
+    local cands = {}
+    for _, f in ipairs(itd and try(function() return itd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) then
+        local nm = try(function() return f:get_name() end)
+        if nm and nm:find("255") then
+          local v = try(function() return f:get_data(nil) end)
+          cands[#cands + 1] = { name = nm, val = v }
+          L("  init candidate: " .. nm .. " = " .. tostring(v))
+        end
+      end
+    end
+    local initset, initname = nil, nil
+    for _, c in ipairs(cands) do
+      if c.name == "Ch255" then initset, initname = c.val, c.name break end
+    end
+    if not initset then
+      for _, c in ipairs(cands) do
+        if c.name == "Ch255_00" or c.name == "Ch255000" or c.name == "Ch255000_00" then
+          initset, initname = c.val, c.name
+          break
+        end
+      end
+    end
+    if not initset and #cands > 0 then
+      initset, initname = cands[1].val, cands[1].name
+    end
+    if not initset then
+      L("no InitSetTypeEnum member names family 255 - cannot fire this probe")
+      return flush("no species init found")
+    end
+    L("init set chosen: " .. initname .. " = " .. tostring(initset))
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local chara = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        chara = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local player = try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+    local rot = prc and try(function() return prc:call("get_Rot") end)
+    if not rot then
+      local pgo = player and try(function() return player:call("get_GameObject") end)
+      local ptr = pgo and try(function() return pgo:call("get_Transform") end)
+      rot = ptr and try(function() return ptr:call("get_Rotation") end)
+    end
+    local scale = try(function() return Vector3f.new(1, 1, 1) end)
+    if not (chara and gpos and rot and scale) then
+      L("missing pieces at build (chara/gpos/rot/scale)")
+      return flush("missing pieces")
+    end
+    local genID = try(function() return gm:call("getPoolGeneratorID") end)
+    local uniqID = try(function() return gm:call("getUniqueIDfromCharacterID", chara) end)
+    local cont = nil
+    if genID and uniqID then
+      local okF, resF = pcall(function()
+        return gm:call("getPoolGenerateInfoContainerForCharacter",
+          genID, uniqID, gpos, rot, scale, 3, 0, chara, initset)
+      end)
+      L("factory call ok=" .. tostring(okF) ..
+        (okF and "" or (" err=" .. tostring(resF))))
+      if okF then cont = resF end
+    end
+    if not cont then
+      L("factory container build failed")
+      return flush("build failed")
+    end
+    local ci = try(function() return cont:call("get_CommonInfo") end)
+    pcall(function() ci:call("setContextPosition", gpos) end)
+    pcall(function() ci:call("setContextAngle", rot) end)
+    pcall(function() gm:call("requestStandbyPrefab", cont) end)
+    if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+    P.cont, P.uniq, P.chara = cont, uniqID, chara
+    L("standby started - press probe step 33 again in a few seconds")
+    return flush("standby started")
+  end
+
+  if prefab_valid() ~= true then
+    pcall(function() gm:call("requestStandbyPrefab", P.cont) end)
+    L("loading: prefab not valid yet - standby re-requested")
+    return flush("still loading")
+  end
+
+  L("prefab VALID - firing requestGenerate once (species init, flags 8)")
+  local cb = function() end
+  local okG, ctrl = pcall(function()
+    return gm:call("requestGenerate", P.cont, 8, false, false, cb, cb)
+  end)
+  L("requestGenerate ok=" .. tostring(okG) .. " -> " .. tostring(ctrl) ..
+    (okG and "" or (" err=" .. tostring(ctrl))))
+  if okG and ctrl then
+    L("SNAPSHOT ctrl: generated=" ..
+      tostring(try(function() return ctrl:call("get_IsGenerated") end)) ..
+      " state=" ..
+      tostring(try(function() return ctrl:call("get_RequestState") end)))
+    SUMMON.ctrl = ctrl
+  end
+  SUMMON.cont, SUMMON.name, SUMMON.chara, SUMMON.uniq =
+    P.cont, "ch255000_00", P.chara, P.uniq
+  SUMMON.fired = true
+  P.done = true
+  L("fired - watch it: targetable? does it move/attack? can you hit it?")
+  return flush("fired")
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.44: summon probe step 34
+-- Step 33: the ONLY InitSetTypeEnum member naming family 255
+-- is Ch255000_11_SummonAppear (203) - a scenario init - and
+-- firing with it crashed the game (banned, like Summon 328).
+-- Generic inits do not crash but do not activate; scenario
+-- inits expect context that does not exist. The init-set
+-- line is closed. What remains is the table route, whose
+-- doors step 31/32 confirmed exist on GenerateManager:
+-- getTable and requestGenerateTable - and table editing is
+-- the one spawn method proven to work on this game version
+-- by other mods. Step 34 is read-only recon for it: inside
+-- the capture hook, take one natural Monster container's
+-- GeneratorID, dump its _TableID value type in full, call
+-- getTable with it, and dump the table (InitialSetData plus
+-- the first set/row entries) and the GenerateTable type's
+-- row-flavored methods. Fires nothing.
+local function sp34_install()
+  if SUMMON.obs34 then return end
+  local O = { hist = {}, done = false, calls = 0 }
+  SUMMON.obs34 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe34.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe34 (bridge 1.89.67) == generate-table recon")
+  local function dump_fields(obj, label, maxn)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local otd = try(function() return obj:get_type_definition() end)
+    local fields = otd and try(function() return otd:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(otd and try(function() return otd:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= (maxn or 36) then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        else
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+        end
+      end
+    end
+  end
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      L("[captured natural Monster container - table recon]")
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      dump_fields(tid, "GenID._TableID", 20)
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = nil
+      if gm and genID then
+        local okT, resT = pcall(function() return gm:call("getTable", genID, 3) end)
+        L("getTable(genID, Monster) ok=" .. tostring(okT) ..
+          " -> " .. tostring(resT) ..
+          (okT and "" or (" err=" .. tostring(resT))))
+        if okT then tbl = resT end
+      end
+      if tbl then
+        dump_fields(tbl, "GenerateTable", 40)
+        local isd = try(function() return tbl:get_field("_InitialSetData") end)
+          or try(function() return tbl:call("get_InitialSetData") end)
+        dump_fields(isd, "table.InitialSetData", 16)
+        local gttd = try(function() return tbl:get_type_definition() end)
+        local ms = gttd and try(function() return gttd:get_methods() end)
+        local hits = {}
+        for _, mm in ipairs(ms or {}) do
+          local mn = try(function() return mm:get_name() end)
+          if mn and (mn:find("Row") or mn:find("SetInfo") or
+                     mn:find("Initial") or mn:find("Generate")) then
+            hits[#hits + 1] = mn
+          end
+        end
+        L("  GenerateTable row methods: " .. table.concat(hits, ", "))
+      end
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+COMMANDS.summon_probe34 = function()
+  sp34_install()
+  local O = SUMMON.obs34
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe34.txt", text) then error("could not write summon_probe34.txt") end
+  return "summon_probe34: " .. tostring(O and O.calls or 0) ..
+    " calls seen, table recon " .. tostring(O and O.done or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.45: summon probe step 35
+-- Step 34: a natural container's RequestID GeneratorID DOES
+-- carry a real table GUID (System.Guid, non-zero), but
+-- getTable(genID, Monster) returned nil - wrong argument
+-- form, or tables are keyed differently. Step 35 stops
+-- guessing the signature: (A) dump GenerateManager's own
+-- fields to find where tables actually live; (B) inside the
+-- capture hook, retry getTable with the live TableID Guid
+-- itself (alone, with category, and the full GenID alone);
+-- (C) if a dictionary/list field on the manager smells like
+-- table storage, enumerate its first entries and dump any
+-- GenerateTable found (fields + InitialSetData). Read-only.
+local function sp35_manager_census(L)
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  if not gm then
+    L("GenerateManager singleton missing")
+    return
+  end
+  local td = try(function() return gm:get_type_definition() end)
+  local fields = td and try(function() return td:get_fields() end)
+  L("[GenerateManager fields]")
+  for _, f in ipairs(fields or {}) do
+    local fn = try(function() return f:get_name() end)
+    if fn and not try(function() return f:is_static() end) then
+      local ft = try(function() return f:get_type() end)
+      local ftn = ft and try(function() return ft:get_full_name() end)
+      local v = try(function() return gm:get_field(fn) end)
+      local tv = type(v)
+      if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+        L("  " .. fn .. " : " .. tostring(ftn) .. " = " .. tostring(v))
+      else
+        L("  " .. fn .. " : " .. tostring(ftn) .. " = <obj> " .. tostring(v))
+      end
+    end
+  end
+end
+
+local function sp35_install()
+  if SUMMON.obs35 then return end
+  local O = { hist = {}, done = false, calls = 0 }
+  SUMMON.obs35 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe35.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe35 (bridge 1.89.67) == table storage census")
+  local function dump_fields(obj, label, maxn)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local otd = try(function() return obj:get_type_definition() end)
+    local fields = otd and try(function() return otd:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(otd and try(function() return otd:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= (maxn or 36) then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        else
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+        end
+      end
+    end
+  end
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      L("[captured natural Monster container - getTable variants]")
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      if gm and tid then
+        local okA, resA = pcall(function() return gm:call("getTable", tid) end)
+        L("getTable(tableID) ok=" .. tostring(okA) .. " -> " .. tostring(resA) ..
+          (okA and "" or (" err=" .. tostring(resA))))
+        local okB, resB = pcall(function() return gm:call("getTable", tid, 3) end)
+        L("getTable(tableID, Monster) ok=" .. tostring(okB) .. " -> " .. tostring(resB) ..
+          (okB and "" or (" err=" .. tostring(resB))))
+        local okC, resC = pcall(function() return gm:call("getTable", genID) end)
+        L("getTable(genID) ok=" .. tostring(okC) .. " -> " .. tostring(resC) ..
+          (okC and "" or (" err=" .. tostring(resC))))
+        local pick = (okA and resA) or (okB and resB) or (okC and resC)
+        if pick then
+          dump_fields(pick, "table from getTable", 40)
+          local isd = try(function() return pick:get_field("_InitialSetData") end)
+            or try(function() return pick:call("get_InitialSetData") end)
+          dump_fields(isd, "table.InitialSetData", 16)
+        end
+      end
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+COMMANDS.summon_probe35 = function()
+  sp35_install()
+  local O = SUMMON.obs35
+  if O then sp35_manager_census(O.log) end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe35.txt", text) then error("could not write summon_probe35.txt") end
+  return "summon_probe35: " .. tostring(O and O.calls or 0) ..
+    " calls seen, variants tried " .. tostring(O and O.done or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.46: summon probe step 36
+-- Step 35 cracked the lookup: getTable(System.Guid) - the
+-- GUID alone - returns the live app.GenerateTable. Its
+-- anatomy: _InitSetDatas (an ARRAY of set data), plus
+-- _EnemySetInfo / _NpcSetInfo / _GimmickSetInfo /
+-- _StrayPawnSetInfo holding the rows. The manager also
+-- exposes the whole registry (_TableIDtoTableIndex,
+-- _TableNameToTableArray) and the ID/container/controller
+-- pools. Step 36 reads one live table's guts in-hook: the
+-- first InitialSetData entries, the EnemySetInfo's fields
+-- and row-flavored methods, and the first row entries -
+-- above all, which field on a row carries the character.
+-- Read-only; the row-swap fire comes after this map.
+local function sp36_install()
+  if SUMMON.obs36 then return end
+  local O = { hist = {}, done = false, calls = 0 }
+  SUMMON.obs36 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe36.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe36 (bridge 1.89.67) == live table anatomy")
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+  local function dump_fields(obj, label, maxn)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local otd = try(function() return obj:get_type_definition() end)
+    local fields = otd and try(function() return otd:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(otd and try(function() return otd:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= (maxn or 36) then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        else
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+        end
+      end
+    end
+  end
+  O.dump_fields, O.arr_len, O.arr_get = dump_fields, arr_len, arr_get
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      L("[captured natural Monster container - table anatomy]")
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and tid and
+        try(function() return gm:call("getTable", tid) end)
+      if not tbl then
+        L("getTable(tableID) returned nil this time")
+        return
+      end
+      local isds = try(function() return tbl:get_field("_InitSetDatas") end)
+      L("InitSetDatas length: " .. tostring(arr_len(isds)))
+      for i = 0, 2 do
+        local isd = arr_get(isds, i)
+        if isd then dump_fields(isd, "InitSetDatas[" .. i .. "]", 16) end
+      end
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      dump_fields(esi, "EnemySetInfo", 30)
+      local esitd = esi and try(function() return esi:get_type_definition() end)
+      local ms = esitd and try(function() return esitd:get_methods() end)
+      local hits = {}
+      for _, mm in ipairs(ms or {}) do
+        local mn = try(function() return mm:get_name() end)
+        if mn and (mn:find("Row") or mn:find("Data") or mn:find("List")) then
+          hits[#hits + 1] = mn
+        end
+      end
+      L("  EnemySetInfo data methods: " .. table.concat(hits, ", "))
+      -- Whatever collection the set info holds, dump row 0.
+      local etd = esitd
+      local efields = etd and try(function() return etd:get_fields() end)
+      for _, f in ipairs(efields or {}) do
+        local fn = try(function() return f:get_name() end)
+        if fn and not try(function() return f:is_static() end) then
+          local v = try(function() return esi:get_field(fn) end)
+          local ln = arr_len(v)
+          if ln and ln > 0 then
+            L("  collection " .. fn .. " length " .. ln)
+            local row = arr_get(v, 0)
+            dump_fields(row, "row[0] via " .. fn, 40)
+          end
+        end
+      end
+      local gtd = try(function() return tbl:get_type_definition() end)
+      local gms = gtd and try(function() return gtd:get_methods() end)
+      local ghits = {}
+      for _, mm in ipairs(gms or {}) do
+        local mn = try(function() return mm:get_name() end)
+        if mn and (mn:find("Request") or mn:find("Generate") or
+                   mn:find("Regenerate") or mn:find("Reload")) then
+          ghits[#ghits + 1] = mn
+        end
+      end
+      L("  GenerateTable generate methods: " .. table.concat(ghits, ", "))
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+COMMANDS.summon_probe36 = function()
+  sp36_install()
+  local O = SUMMON.obs36
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe36.txt", text) then error("could not write summon_probe36.txt") end
+  return "summon_probe36: " .. tostring(O and O.calls or 0) ..
+    " calls seen, anatomy read " .. tostring(O and O.done or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.47: summon probe step 37
+-- Step 36 flaked: getTable(tableID) returned nil for that
+-- capture, though step 35's identical call worked. The
+-- lookup evidently does not resolve every live container's
+-- table (unregistered, NRD, or not-yet-registered tables).
+-- Step 37 decouples the anatomy from that race: it scans
+-- the manager's own table registry array
+-- (<TableNameToTableArray>) directly at command time and
+-- dumps the first table that actually has enemy rows -
+-- InitSetDatas, EnemySetInfo, row[0], generate methods.
+-- The hook stays on as a side-channel, mapping which
+-- natural TableID GUIDs getTable resolves and which it
+-- does not. Read-only throughout.
+local function sp37_registry_scan(L)
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  if not gm then
+    L("GenerateManager singleton missing")
+    return
+  end
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+  end
+  local function dump_fields(obj, label, maxn)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local otd = try(function() return obj:get_type_definition() end)
+    local fields = otd and try(function() return otd:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(otd and try(function() return otd:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= (maxn or 36) then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        else
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+        end
+      end
+    end
+  end
+  local arr = try(function() return gm:get_field("<TableNameToTableArray>k__BackingField") end)
+  local n = arr_len(arr)
+  L("registry <TableNameToTableArray> length: " .. tostring(n))
+  if not (arr and n) then return end
+  local dumped = 0
+  for i = 0, n - 1 do
+    if dumped >= 1 then break end
+    local tbl = arr_get(arr, i)
+    if tbl then
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      if esi then
+        -- Find a collection on the set info with rows.
+        local etd = try(function() return esi:get_type_definition() end)
+        local efields = etd and try(function() return etd:get_fields() end)
+        local rowfield, rowcount = nil, 0
+        for _, f in ipairs(efields or {}) do
+          local fn = try(function() return f:get_name() end)
+          if fn and not try(function() return f:is_static() end) then
+            local v = try(function() return esi:get_field(fn) end)
+            local ln = arr_len(v)
+            if ln and ln > rowcount then
+              rowfield, rowcount = fn, ln
+            end
+          end
+        end
+        if rowfield then
+          dumped = dumped + 1
+          L("[registry table #" .. i .. " - has enemy rows]")
+          dump_fields(tbl, "GenerateTable", 12)
+          local isds = try(function() return tbl:get_field("_InitSetDatas") end)
+          L("  InitSetDatas length: " .. tostring(arr_len(isds)))
+          for j = 0, 1 do
+            local isd = arr_get(isds, j)
+            if isd then dump_fields(isd, "InitSetDatas[" .. j .. "]", 16) end
+          end
+          dump_fields(esi, "EnemySetInfo", 30)
+          L("  row collection: " .. rowfield .. " length " .. rowcount)
+          local coll = try(function() return esi:get_field(rowfield) end)
+          local row = arr_get(coll, 0)
+          dump_fields(row, "row[0]", 44)
+          local gtd = try(function() return tbl:get_type_definition() end)
+          local gms = gtd and try(function() return gtd:get_methods() end)
+          local ghits = {}
+          for _, mm in ipairs(gms or {}) do
+            local mn = try(function() return mm:get_name() end)
+            if mn and (mn:find("Request") or mn:find("Generate") or
+                       mn:find("Regenerate") or mn:find("Reload")) then
+              ghits[#ghits + 1] = mn
+            end
+          end
+          L("  GenerateTable generate methods: " .. table.concat(ghits, ", "))
+        end
+      end
+    end
+  end
+  if dumped == 0 then L("no registry table with enemy rows found") end
+end
+
+local function sp37_install()
+  if SUMMON.obs37 then return end
+  local O = { hist = {}, seen = {}, tried = 0, calls = 0 }
+  SUMMON.obs37 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe37.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe37 (bridge 1.89.67) == registry scan + GUID resolution map")
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.tried >= 6 then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      if not tid then return end
+      local key = tostring(try(function() return tid:call("ToString") end))
+      if O.seen[key] then return end
+      O.seen[key] = true
+      O.tried = O.tried + 1
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and try(function() return gm:call("getTable", tid) end)
+      L("guid " .. key .. " -> getTable: " .. (tbl and "TABLE" or "nil"))
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok))
+end
+
+COMMANDS.summon_probe37 = function()
+  sp37_install()
+  local O = SUMMON.obs37
+  if O then sp37_registry_scan(O.log) end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe37.txt", text) then error("could not write summon_probe37.txt") end
+  return "summon_probe37: registry scanned; " ..
+    tostring(O and O.tried or 0) .. " natural GUIDs mapped"
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.48: summon probe step 38
+-- Step 37's GUID map: 4 of 6 natural table GUIDs resolve
+-- through getTable (the other 2 are some other table kind).
+-- Its registry-array scan failed separately - the array
+-- length could not be read through the usual accessors.
+-- Step 38 merges the two: inside the hook, for each
+-- distinct natural GUID, if getTable resolves, dump that
+-- table's full anatomy immediately (while everything is
+-- alive): GenerateTable fields, InitSetDatas entries,
+-- EnemySetInfo fields, the first row, and the table's
+-- generate/request method names. The array helpers try a
+-- broader battery of accessors this time. Read-only.
+local function sp38_install()
+  if SUMMON.obs38 then return end
+  local O = { hist = {}, seen = {}, anatomy = false, calls = 0 }
+  SUMMON.obs38 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1400 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe38.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe38 (bridge 1.89.67) == anatomy at a resolving table")
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+      or try(function() return a:call("get_Size") end)
+      or try(function() return a:call("size") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+      or try(function() return a:call("get_element", i) end)
+  end
+  local function dump_fields(obj, label, maxn)
+    if not obj then
+      L("  " .. label .. ": (nil)")
+      return
+    end
+    local otd = try(function() return obj:get_type_definition() end)
+    local fields = otd and try(function() return otd:get_fields() end)
+    L("  " .. label .. " [" ..
+      tostring(otd and try(function() return otd:get_full_name() end)) .. "]")
+    if not fields then return end
+    local n = 0
+    for _, f in ipairs(fields) do
+      if n >= (maxn or 36) then break end
+      local fn = try(function() return f:get_name() end)
+      if fn and not try(function() return f:is_static() end) then
+        n = n + 1
+        local v = try(function() return obj:get_field(fn) end)
+        local tv = type(v)
+        if v == nil or tv == "number" or tv == "boolean" or tv == "string" then
+          L("    " .. fn .. " = " .. tostring(v))
+        else
+          L("    " .. fn .. " = <obj> " .. tostring(v))
+        end
+      end
+    end
+  end
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.anatomy then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      if not tid then return end
+      local key = tostring(try(function() return tid:call("ToString") end))
+      if O.seen[key] then return end
+      O.seen[key] = true
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and try(function() return gm:call("getTable", tid) end)
+      L("guid " .. key .. " -> getTable: " .. (tbl and "TABLE" or "nil"))
+      if not tbl then return end
+      O.anatomy = true
+      L("[anatomy of the resolving table]")
+      dump_fields(tbl, "GenerateTable", 12)
+      local isds = try(function() return tbl:get_field("_InitSetDatas") end)
+      L("  InitSetDatas length: " .. tostring(arr_len(isds)))
+      for j = 0, 1 do
+        local isd = arr_get(isds, j)
+        if isd then dump_fields(isd, "InitSetDatas[" .. j .. "]", 16) end
+      end
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      dump_fields(esi, "EnemySetInfo", 30)
+      local etd = esi and try(function() return esi:get_type_definition() end)
+      local efields = etd and try(function() return etd:get_fields() end)
+      for _, f in ipairs(efields or {}) do
+        local fn = try(function() return f:get_name() end)
+        if fn and not try(function() return f:is_static() end) then
+          local v = try(function() return esi:get_field(fn) end)
+          local ln = arr_len(v)
+          if ln and ln > 0 then
+            L("  collection " .. fn .. " length " .. ln)
+            dump_fields(arr_get(v, 0), "row[0] via " .. fn, 44)
+          end
+        end
+      end
+      local gtd = try(function() return tbl:get_type_definition() end)
+      local gms = gtd and try(function() return gtd:get_methods() end)
+      local ghits = {}
+      for _, mm in ipairs(gms or {}) do
+        local mn = try(function() return mm:get_name() end)
+        if mn and (mn:find("Request") or mn:find("Generate") or
+                   mn:find("Regenerate") or mn:find("Reload") or
+                   mn:find("Row") or mn:find("Set")) then
+          ghits[#ghits + 1] = mn
+        end
+      end
+      L("  GenerateTable methods: " .. table.concat(ghits, ", "))
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies, then press the probe again")
+end
+
+COMMANDS.summon_probe38 = function()
+  sp38_install()
+  local O = SUMMON.obs38
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe38.txt", text) then error("could not write summon_probe38.txt") end
+  return "summon_probe38: " .. tostring(O and O.calls or 0) ..
+    " calls seen, anatomy read " .. tostring(O and O.anatomy or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.49: summon probe step 39
+-- Step 38 mapped the table: GenerateTable._EnemySetInfo
+-- ._BasicRowDatas[] of app.GenerateRowData - _CharaID (int),
+-- _Group, _AppearRate, _ManualPos/Angle/Scale, wander flags,
+-- and each row owns a prebuilt _Container. Step 39 is the
+-- swap itself, in three stages:
+--   ARM (hook): a natural Monster container is matched by
+--     pointer to the row that owns it in its (resolving)
+--     table; the table GUID, row index and original _CharaID
+--     are recorded as plain data.
+--   SWAP (next press): the table is re-fetched fresh, the
+--     row's _CharaID is rewritten to ch255000_00, its
+--     _ManualPos and the container's context position are
+--     set to the player's ground position, then regeneration
+--     is attempted (requestGenerateTable argument battery,
+--     first non-throwing form wins; fallback: requestGenerate
+--     on the row's own container with flags 8).
+--   RESTORE (press after swap): original _CharaID written
+--     back and regeneration attempted again.
+-- Table data is runtime state (rebuilt from area data), and
+-- the original value is logged before any edit.
+local function sp39_install()
+  if SUMMON.obs39 then return end
+  local O = { hist = {}, calls = 0, arm = nil, swapped = false }
+  SUMMON.obs39 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 600 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe39.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe39 (bridge 1.89.67) == the row swap")
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+      or try(function() return a:call("get_Size") end)
+      or try(function() return a:call("size") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+      or try(function() return a:call("get_element", i) end)
+  end
+  O.arr_len, O.arr_get = arr_len, arr_get
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.arm then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      if not tid then return end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and try(function() return gm:call("getTable", tid) end)
+      if not tbl then return end
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+      local n = arr_len(rows)
+      if not n then return end
+      for i = 0, n - 1 do
+        local row = arr_get(rows, i)
+        local rc = row and try(function() return row:get_field("_Container") end)
+        if rc and tostring(rc) == tostring(cont) then
+          O.arm = {
+            tid = tid,
+            guid = tostring(try(function() return tid:call("ToString") end)),
+            rowIndex = i,
+            origChara = try(function() return row:get_field("_CharaID") end),
+          }
+          L("ARMED: table " .. O.arm.guid .. " row " .. i ..
+            " origChara=" .. tostring(O.arm.origChara) ..
+            " - press the probe again to SWAP")
+          return
+        end
+      end
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies until ARMED, then press again")
+end
+
+local function sp39_regen(L, gm, tbl, tid)
+  local forms = {
+    { "requestGenerateTable(table)", function() return gm:call("requestGenerateTable", tbl) end },
+    { "requestGenerateTable(tableID)", function() return gm:call("requestGenerateTable", tid) end },
+    { "requestGenerateTable(tableID, Monster)", function() return gm:call("requestGenerateTable", tid, 3) end },
+  }
+  for _, f in ipairs(forms) do
+    local ok, res = pcall(f[2])
+    L("  " .. f[1] .. " ok=" .. tostring(ok) .. " -> " .. tostring(res) ..
+      (ok and "" or (" err=" .. tostring(res))))
+    if ok then return true end
+  end
+  return false
+end
+
+local function sp39_swap_or_restore()
+  local O = SUMMON.obs39
+  local L = O.log
+  local arm = O.arm
+  if not arm then return "not armed yet" end
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local tbl = gm and try(function() return gm:call("getTable", arm.tid) end)
+  if not tbl then
+    L("table no longer resolves (area changed?) - re-arm by walking")
+    O.arm = nil
+    return "table gone"
+  end
+  local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+  local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+  local row = rows and O.arr_get(rows, arm.rowIndex)
+  if not row then
+    L("row not found at recorded index")
+    return "row missing"
+  end
+  local cur = try(function() return row:get_field("_CharaID") end)
+  if not O.swapped then
+    if cur ~= arm.origChara then
+      L("row chara changed since arming (" .. tostring(cur) ..
+        " vs " .. tostring(arm.origChara) .. ") - refusing to swap")
+      return "row drifted"
+    end
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local boss = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        boss = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local bossInt = boss and tonumber(tostring(boss))
+    L("boss ch255000_00 int = " .. tostring(bossInt))
+    if not bossInt then return "boss id unresolved" end
+    local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    pcall(function() row:set_field("_CharaID", bossInt) end)
+    L("row _CharaID now = " ..
+      tostring(try(function() return row:get_field("_CharaID") end)))
+    if gpos then
+      pcall(function() row:set_field("_ManualPos", gpos) end)
+      local rc = try(function() return row:get_field("_Container") end)
+      local rci = rc and try(function() return rc:call("get_CommonInfo") end)
+      if rci then pcall(function() rci:call("setContextPosition", gpos) end) end
+      L("row _ManualPos + container context set to your ground position")
+      if rc then
+        local okF, resF = pcall(function()
+          local cb = function() end
+          return gm:call("requestGenerate", rc, 8, false, false, cb, cb)
+        end)
+        L("fallback fire requestGenerate(row container, 8) ok=" ..
+          tostring(okF) .. " -> " .. tostring(resF))
+      end
+    end
+    sp39_regen(L, gm, tbl, arm.tid)
+    O.swapped = true
+    L("SWAPPED - look around: a Medusa should appear at your feet" ..
+      " (or at the row's home). Press again to RESTORE the row.")
+    return "swapped"
+  else
+    pcall(function() row:set_field("_CharaID", arm.origChara) end)
+    L("row _CharaID restored to " ..
+      tostring(try(function() return row:get_field("_CharaID") end)))
+    sp39_regen(L, gm, tbl, arm.tid)
+    O.swapped = false
+    L("RESTORED")
+    return "restored"
+  end
+end
+
+COMMANDS.summon_probe39 = function()
+  sp39_install()
+  local O = SUMMON.obs39
+  local tag = "armed=" .. tostring(O and O.arm ~= nil)
+  if O and O.arm then tag = sp39_swap_or_restore() end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe39.txt", text) then error("could not write summon_probe39.txt") end
+  return "summon_probe39: " .. tag
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.50: summon probe step 40
+-- Step 39's arm never fired in the field and logged nothing
+-- about its attempts, so the failing joint was invisible.
+-- Likely suspect: the row's _Container is a master copy and
+-- the pipeline presents pooled clones to requestGenerate,
+-- so pointer equality never holds. Step 40 keeps the same
+-- arm/swap/restore stages but (a) logs the first 8 capture
+-- attempts in full (GUID, getTable result, every row's
+-- container pointer and _ManualPos, the presented
+-- container's pointer and _InitialPosition), and (b) arms
+-- on a POSITIONAL match when the pointer match fails: a
+-- row whose _ManualPos equals the presented container's
+-- _InitialPosition (within 0.5m) is that container's row.
+local function sp40_install()
+  if SUMMON.obs40 then return end
+  local O = { hist = {}, calls = 0, arm = nil, swapped = false }
+  SUMMON.obs40 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 600 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe40.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe40 (bridge 1.89.67) == the row swap")
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+      or try(function() return a:call("get_Size") end)
+      or try(function() return a:call("size") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+      or try(function() return a:call("get_element", i) end)
+  end
+  O.arr_len, O.arr_get = arr_len, arr_get
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.arm then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      if not tid then return end
+      local guid = tostring(try(function() return tid:call("ToString") end))
+      if O.seenG and O.seenG[guid] then return end
+      O.seenG = O.seenG or {}
+      O.seenG[guid] = true
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and try(function() return gm:call("getTable", tid) end)
+      local ipos = ci and try(function() return ci:get_field("_InitialPosition") end)
+      local ix = ipos and try(function() return ipos:get_field("x") end)
+      local iy = ipos and try(function() return ipos:get_field("y") end)
+      local iz = ipos and try(function() return ipos:get_field("z") end)
+      L("[attempt] guid " .. guid .. " getTable=" .. (tbl and "TABLE" or "nil") ..
+        " cont=" .. tostring(cont) ..
+        " initPos=(" .. tostring(ix) .. "," .. tostring(iy) .. "," ..
+        tostring(iz) .. ")")
+      if not tbl then return end
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+      local n = arr_len(rows)
+      if not n then
+        L("  rows unreadable")
+        return
+      end
+      for i = 0, n - 1 do
+        local row = arr_get(rows, i)
+        local rc = row and try(function() return row:get_field("_Container") end)
+        local mp = row and try(function() return row:get_field("_ManualPos") end)
+        local mx = mp and try(function() return mp:get_field("x") end)
+        local my = mp and try(function() return mp:get_field("y") end)
+        local mz = mp and try(function() return mp:get_field("z") end)
+        L("  row " .. i .. " container=" .. tostring(rc) ..
+          " manualPos=(" .. tostring(mx) .. "," .. tostring(my) .. "," ..
+          tostring(mz) .. ") chara=" ..
+          tostring(row and try(function() return row:get_field("_CharaID") end)))
+        if rc and tostring(rc) == tostring(cont) then
+          O.arm = {
+            tid = tid, guid = guid, rowIndex = i,
+            origChara = try(function() return row:get_field("_CharaID") end),
+          }
+          L("ARMED by pointer: table " .. guid .. " row " .. i ..
+            " origChara=" .. tostring(O.arm.origChara) ..
+            " - press the probe again to SWAP")
+          return
+        end
+        if ix and mx and math.abs(ix - mx) < 0.5 and
+           math.abs(iy - my) < 0.5 and math.abs(iz - mz) < 0.5 then
+          O.arm = {
+            tid = tid, guid = guid, rowIndex = i,
+            origChara = try(function() return row:get_field("_CharaID") end),
+          }
+          L("ARMED by position: table " .. guid .. " row " .. i ..
+            " origChara=" .. tostring(O.arm.origChara) ..
+            " - press the probe again to SWAP")
+          return
+        end
+      end
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - walk into fresh enemies until ARMED, then press again")
+end
+
+local function sp40_regen(L, gm, tbl, tid)
+  local forms = {
+    { "requestGenerateTable(table)", function() return gm:call("requestGenerateTable", tbl) end },
+    { "requestGenerateTable(tableID)", function() return gm:call("requestGenerateTable", tid) end },
+    { "requestGenerateTable(tableID, Monster)", function() return gm:call("requestGenerateTable", tid, 3) end },
+  }
+  for _, f in ipairs(forms) do
+    local ok, res = pcall(f[2])
+    L("  " .. f[1] .. " ok=" .. tostring(ok) .. " -> " .. tostring(res) ..
+      (ok and "" or (" err=" .. tostring(res))))
+    if ok then return true end
+  end
+  return false
+end
+
+local function sp40_swap_or_restore()
+  local O = SUMMON.obs40
+  local L = O.log
+  local arm = O.arm
+  if not arm then return "not armed yet" end
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local tbl = gm and try(function() return gm:call("getTable", arm.tid) end)
+  if not tbl then
+    L("table no longer resolves (area changed?) - re-arm by walking")
+    O.arm = nil
+    return "table gone"
+  end
+  local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+  local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+  local row = rows and O.arr_get(rows, arm.rowIndex)
+  if not row then
+    L("row not found at recorded index")
+    return "row missing"
+  end
+  local cur = try(function() return row:get_field("_CharaID") end)
+  if not O.swapped then
+    if cur ~= arm.origChara then
+      L("row chara changed since arming (" .. tostring(cur) ..
+        " vs " .. tostring(arm.origChara) .. ") - refusing to swap")
+      return "row drifted"
+    end
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local boss = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        boss = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    local bossInt = boss and tonumber(tostring(boss))
+    L("boss ch255000_00 int = " .. tostring(bossInt))
+    if not bossInt then return "boss id unresolved" end
+    local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+    local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+    pcall(function() row:set_field("_CharaID", bossInt) end)
+    L("row _CharaID now = " ..
+      tostring(try(function() return row:get_field("_CharaID") end)))
+    if gpos then
+      pcall(function() row:set_field("_ManualPos", gpos) end)
+      local rc = try(function() return row:get_field("_Container") end)
+      local rci = rc and try(function() return rc:call("get_CommonInfo") end)
+      if rci then pcall(function() rci:call("setContextPosition", gpos) end) end
+      L("row _ManualPos + container context set to your ground position")
+      if rc then
+        local okF, resF = pcall(function()
+          local cb = function() end
+          return gm:call("requestGenerate", rc, 8, false, false, cb, cb)
+        end)
+        L("fallback fire requestGenerate(row container, 8) ok=" ..
+          tostring(okF) .. " -> " .. tostring(resF))
+      end
+    end
+    sp40_regen(L, gm, tbl, arm.tid)
+    O.swapped = true
+    L("SWAPPED - look around: a Medusa should appear at your feet" ..
+      " (or at the row's home). Press again to RESTORE the row.")
+    return "swapped"
+  else
+    pcall(function() row:set_field("_CharaID", arm.origChara) end)
+    L("row _CharaID restored to " ..
+      tostring(try(function() return row:get_field("_CharaID") end)))
+    sp40_regen(L, gm, tbl, arm.tid)
+    O.swapped = false
+    L("RESTORED")
+    return "restored"
+  end
+end
+
+COMMANDS.summon_probe40 = function()
+  sp40_install()
+  local O = SUMMON.obs40
+  local tag = "armed=" .. tostring(O and O.arm ~= nil)
+  if O and O.arm then tag = sp40_swap_or_restore() end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe40.txt", text) then error("could not write summon_probe40.txt") end
+  return "summon_probe40: " .. tag
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.51: summon probe step 41
+-- Step 40's swap edited the row and requestGenerateTable
+-- accepted - and nothing appeared. The gaps it exposed:
+-- (a) the swap happened a press AFTER the group presented,
+-- by which time its containers were already cloned and
+-- quite possibly already generated; (b) only the row data
+-- was edited, while the row's master container keeps its
+-- baked character ID; (c) the arm itself was a zero-position
+-- fluke. Step 41 removes the gap: the swap executes INSIDE
+-- the hook, at the moment a matching group first presents.
+-- A table qualifies when it resolves via getTable AND one
+-- of its rows carries the presented container's character.
+-- On the first qualifying table it: rewrites EVERY row's
+-- _CharaID to ch255000_00 (originals logged), stamps each
+-- row's master container with a boss ObjectID (the manager's
+-- getIdWrapper path, field-set fallback) and the player's
+-- ground position, fires requestGenerate once on the first
+-- master, then calls requestGenerateTable. One-shot per
+-- session. The next press RESTORES rows and master IDs.
+local function sp41_install()
+  if SUMMON.obs41 then return end
+  local O = { hist = {}, calls = 0, done = false, seenG = {}, saved = nil }
+  SUMMON.obs41 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 800 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe41.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe41 (bridge 1.89.67) == in-hook whole-table swap")
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+      or try(function() return a:call("get_Size") end)
+      or try(function() return a:call("size") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+      or try(function() return a:call("get_element", i) end)
+  end
+  O.arr_len, O.arr_get = arr_len, arr_get
+  local function boss_enum()
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+  O.boss_enum = boss_enum
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+      local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+      local presInt = sel and tonumber(tostring(sel))
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      if not (tid and presInt) then return end
+      local guid = tostring(try(function() return tid:call("ToString") end))
+      if O.seenG[guid] then return end
+      O.seenG[guid] = true
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and try(function() return gm:call("getTable", tid) end)
+      L("[attempt] guid " .. guid .. " presented chara=" .. presInt ..
+        " getTable=" .. (tbl and "TABLE" or "nil"))
+      if not tbl then return end
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+      local n = arr_len(rows)
+      if not n then return end
+      local match = false
+      for i = 0, n - 1 do
+        local row = arr_get(rows, i)
+        if row and try(function() return row:get_field("_CharaID") end) == presInt then
+          match = true
+          break
+        end
+      end
+      L("  rows=" .. n .. " presented-chara match=" .. tostring(match))
+      if not match then return end
+      -- QUALIFIES: execute the swap right here.
+      local boss = boss_enum()
+      local bossInt = boss and tonumber(tostring(boss))
+      if not bossInt then
+        L("  boss id unresolved - aborting")
+        return
+      end
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local origs = {}
+      local wrapper = gm and
+        try(function() return gm:call("getIdWrapper", boss) end)
+      L("  boss wrapper from getIdWrapper: " .. tostring(wrapper))
+      for i = 0, n - 1 do
+        local row = arr_get(rows, i)
+        if row then
+          origs[i] = try(function() return row:get_field("_CharaID") end)
+          pcall(function() row:set_field("_CharaID", bossInt) end)
+          local mc = try(function() return row:get_field("_Container") end)
+          local mci = mc and try(function() return mc:call("get_CommonInfo") end)
+          if mci then
+            local stamped = false
+            if wrapper then
+              stamped = pcall(function()
+                mci:call("set_ObjectID", sdk.to_ptr(wrapper))
+              end)
+            end
+            if not stamped then
+              local moi = try(function() return mci:get_field("_ObjectID") end)
+              if moi then
+                pcall(function() moi:set_field("_SelectedCharacterID", boss) end)
+              end
+            end
+            if gpos then pcall(function() mci:call("setContextPosition", gpos) end) end
+          end
+          L("  row " .. i .. ": chara " .. tostring(origs[i]) .. " -> " ..
+            tostring(try(function() return row:get_field("_CharaID") end)))
+        end
+      end
+      local row0 = arr_get(rows, 0)
+      local mc0 = row0 and try(function() return row0:get_field("_Container") end)
+      if mc0 then
+        local okF, resF = pcall(function()
+          local cb = function() end
+          return gm:call("requestGenerate", mc0, 8, false, false, cb, cb)
+        end)
+        L("  fire requestGenerate(master row 0, 8) ok=" .. tostring(okF) ..
+          " -> " .. tostring(resF))
+      end
+      local okR, resR = pcall(function()
+        return gm:call("requestGenerateTable", tbl)
+      end)
+      L("  requestGenerateTable(table) ok=" .. tostring(okR) ..
+        " -> " .. tostring(resR))
+      O.saved = { tid = tid, guid = guid, origs = origs, n = n }
+      O.done = true
+      L("SWAPPED in-hook on table " .. guid ..
+        " - look for the Medusa at your feet / in this group." ..
+        " Press the probe again to RESTORE.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - LIVE: the first matching enemy group you approach gets swapped")
+end
+
+local function sp41_restore()
+  local O = SUMMON.obs41
+  local L = O.log
+  local sv = O.saved
+  if not sv then return "nothing to restore" end
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local tbl = gm and try(function() return gm:call("getTable", sv.tid) end)
+  if not tbl then
+    L("restore: table no longer resolves (area changed - runtime state resets anyway)")
+    O.saved = nil
+    return "table gone"
+  end
+  local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+  local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local function enum_by_int(want)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) then
+        local d = try(function() return f:get_data(nil) end)
+        if d and tonumber(tostring(d)) == want then return d end
+      end
+    end
+    return nil
+  end
+  for i = 0, sv.n - 1 do
+    local row = rows and O.arr_get(rows, i)
+    local orig = sv.origs[i]
+    if row and orig then
+      pcall(function() row:set_field("_CharaID", orig) end)
+      local oe = enum_by_int(orig)
+      local mc = try(function() return row:get_field("_Container") end)
+      local mci = mc and try(function() return mc:call("get_CommonInfo") end)
+      if mci and oe then
+        local w = try(function() return gm:call("getIdWrapper", oe) end)
+        if w then
+          pcall(function() mci:call("set_ObjectID", sdk.to_ptr(w)) end)
+        end
+      end
+      L("  row " .. i .. " restored to " ..
+        tostring(try(function() return row:get_field("_CharaID") end)))
+    end
+  end
+  pcall(function() return gm:call("requestGenerateTable", tbl) end)
+  O.saved = nil
+  L("RESTORED table " .. sv.guid)
+  return "restored"
+end
+
+COMMANDS.summon_probe41 = function()
+  sp41_install()
+  local O = SUMMON.obs41
+  local tag = "waiting for a matching group"
+  if O and O.done then tag = sp41_restore() end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe41.txt", text) then error("could not write summon_probe41.txt") end
+  return "summon_probe41: " .. tag
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.52: summon probe step 42
+-- Step 41's swap was mechanically perfect - whole-table
+-- row rewrite verified, master containers stamped with the
+-- real boss wrapper, both regeneration calls accepted -
+-- and still nothing appeared. Everything measurable did
+-- its job except the world. The remaining explanation:
+-- edits to a registered table only take effect when the
+-- area RE-REGISTERS it (unload + reload), re-cloning fresh
+-- containers from the edited masters. Step 42 is that
+-- reload test, kept clean: the in-hook swap edits rows and
+-- stamps masters and does NOTHING else (no fires, no regen
+-- calls to muddy attribution). The user then leaves until
+-- the area unloads (a ferrystone trip guarantees it) and
+-- returns: if the group respawns as Medusas, edited masters
+-- are what re-registration clones from. Press flow fixed
+-- too: after the swap, one press only REPORTS (step 41's
+-- copy press silently restored and burned the window);
+-- the press after that restores.
+local function sp42_install()
+  if SUMMON.obs42 then return end
+  local O = { hist = {}, calls = 0, done = false, seenG = {}, saved = nil }
+  SUMMON.obs42 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 800 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe42.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe42 (bridge 1.89.67) == in-hook whole-table swap")
+  local function arr_len(a)
+    if not a then return nil end
+    return try(function() return a:call("get_Length") end)
+      or try(function() return a:call("get_Count") end)
+      or try(function() return a:call("get_length") end)
+      or try(function() return a:call("get_Size") end)
+      or try(function() return a:call("size") end)
+  end
+  local function arr_get(a, i)
+    if not a then return nil end
+    return try(function() return a:call("get_Item", i) end)
+      or try(function() return a:call("GetValue", i) end)
+      or try(function() return a:call("get_element", i) end)
+  end
+  O.arr_len, O.arr_get = arr_len, arr_get
+  local function boss_enum()
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+  O.boss_enum = boss_enum
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+      local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+      local presInt = sel and tonumber(tostring(sel))
+      local rid = ci and try(function() return ci:get_field("_RequestID") end)
+      local genID = rid and try(function() return rid:get_field("_GenID") end)
+      local tid = genID and try(function() return genID:get_field("_TableID") end)
+      if not (tid and presInt) then return end
+      local guid = tostring(try(function() return tid:call("ToString") end))
+      if O.seenG[guid] then return end
+      O.seenG[guid] = true
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local tbl = gm and try(function() return gm:call("getTable", tid) end)
+      L("[attempt] guid " .. guid .. " presented chara=" .. presInt ..
+        " getTable=" .. (tbl and "TABLE" or "nil"))
+      if not tbl then return end
+      local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+      local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+      local n = arr_len(rows)
+      if not n then return end
+      local match = false
+      for i = 0, n - 1 do
+        local row = arr_get(rows, i)
+        if row and try(function() return row:get_field("_CharaID") end) == presInt then
+          match = true
+          break
+        end
+      end
+      L("  rows=" .. n .. " presented-chara match=" .. tostring(match))
+      if not match then return end
+      -- QUALIFIES: execute the swap right here.
+      local boss = boss_enum()
+      local bossInt = boss and tonumber(tostring(boss))
+      if not bossInt then
+        L("  boss id unresolved - aborting")
+        return
+      end
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local origs = {}
+      local wrapper = gm and
+        try(function() return gm:call("getIdWrapper", boss) end)
+      L("  boss wrapper from getIdWrapper: " .. tostring(wrapper))
+      for i = 0, n - 1 do
+        local row = arr_get(rows, i)
+        if row then
+          origs[i] = try(function() return row:get_field("_CharaID") end)
+          pcall(function() row:set_field("_CharaID", bossInt) end)
+          local mc = try(function() return row:get_field("_Container") end)
+          local mci = mc and try(function() return mc:call("get_CommonInfo") end)
+          if mci then
+            local stamped = false
+            if wrapper then
+              stamped = pcall(function()
+                mci:call("set_ObjectID", sdk.to_ptr(wrapper))
+              end)
+            end
+            if not stamped then
+              local moi = try(function() return mci:get_field("_ObjectID") end)
+              if moi then
+                pcall(function() moi:set_field("_SelectedCharacterID", boss) end)
+              end
+            end
+            if gpos then pcall(function() mci:call("setContextPosition", gpos) end) end
+          end
+          L("  row " .. i .. ": chara " .. tostring(origs[i]) .. " -> " ..
+            tostring(try(function() return row:get_field("_CharaID") end)))
+        end
+      end
+      O.saved = { tid = tid, guid = guid, origs = origs, n = n }
+      O.done = true
+      L("SWAPPED in-hook on table " .. guid ..
+        " - now LEAVE until the area unloads (ferrystone away and back)," ..
+        " return, and look at this group. Press reports, press again restores.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - LIVE: the first matching enemy group you approach gets swapped")
+end
+
+local function sp42_restore()
+  local O = SUMMON.obs42
+  local L = O.log
+  local sv = O.saved
+  if not sv then return "nothing to restore" end
+  local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+  local tbl = gm and try(function() return gm:call("getTable", sv.tid) end)
+  if not tbl then
+    L("restore: table no longer resolves (area changed - runtime state resets anyway)")
+    O.saved = nil
+    return "table gone"
+  end
+  local esi = try(function() return tbl:get_field("_EnemySetInfo") end)
+  local rows = esi and try(function() return esi:get_field("_BasicRowDatas") end)
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local function enum_by_int(want)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) then
+        local d = try(function() return f:get_data(nil) end)
+        if d and tonumber(tostring(d)) == want then return d end
+      end
+    end
+    return nil
+  end
+  for i = 0, sv.n - 1 do
+    local row = rows and O.arr_get(rows, i)
+    local orig = sv.origs[i]
+    if row and orig then
+      pcall(function() row:set_field("_CharaID", orig) end)
+      local oe = enum_by_int(orig)
+      local mc = try(function() return row:get_field("_Container") end)
+      local mci = mc and try(function() return mc:call("get_CommonInfo") end)
+      if mci and oe then
+        local w = try(function() return gm:call("getIdWrapper", oe) end)
+        if w then
+          pcall(function() mci:call("set_ObjectID", sdk.to_ptr(w)) end)
+        end
+      end
+      L("  row " .. i .. " restored to " ..
+        tostring(try(function() return row:get_field("_CharaID") end)))
+    end
+  end
+  O.saved = nil
+  L("RESTORED table " .. sv.guid)
+  return "restored"
+end
+
+COMMANDS.summon_probe42 = function()
+  sp42_install()
+  local O = SUMMON.obs42
+  local tag = "waiting for a matching group"
+  if O and O.done then
+    if not O.reported then
+      O.reported = true
+      tag = "swapped on table " .. tostring(O.saved and O.saved.guid) ..
+        " - status only, next press restores"
+    else
+      tag = sp42_restore()
+    end
+  end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe42.txt", text) then error("could not write summon_probe42.txt") end
+  return "summon_probe42: " .. tag
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.53: summon probe step 43
+-- Step 42 closed the runtime table route: a verified
+-- whole-table swap survived a ferrystone round trip and the
+-- group still respawned as originals - re-registration does
+-- not read the live table objects we can edit. So: stop
+-- editing data the pipeline has already consumed, and stop
+-- building containers the pipeline never asked for. Ride
+-- the pipeline itself. The requestGenerate hook fires
+-- BEFORE the game's own call executes, on the actual clone
+-- container the game is about to generate - a container
+-- with real registration, a real table identity, and a
+-- place in the distributor's queue. Step 43 rewrites THAT
+-- container in the pre-hook: its ObjectID becomes the
+-- boss (manager getIdWrapper + set_ObjectID, the reference
+-- mod's mechanism), its context position becomes the
+-- player's ground position, and prefab standby is requested
+-- for it - then the game's call proceeds untouched and
+-- generates whatever the container now says. One-shot: the
+-- first Monster container presented after arming. Nothing
+-- is fired externally; no table is edited.
+local function sp43_install()
+  if SUMMON.obs43 then return end
+  local O = { hist = {}, calls = 0, done = false }
+  SUMMON.obs43 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 400 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe43.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe43 (bridge 1.89.67) == ride the game's generate call")
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+      local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+      L("[riding] presented chara=" .. tostring(sel) ..
+        " - rewriting this container to the boss")
+      local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+      local boss = nil
+      for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) and
+           try(function() return f:get_name() end) == "ch255000_00" then
+          boss = try(function() return f:get_data(nil) end)
+          break
+        end
+      end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      local wrapper = gm and boss and
+        try(function() return gm:call("getIdWrapper", boss) end)
+      L("  boss wrapper: " .. tostring(wrapper))
+      local stamped = false
+      if wrapper then
+        stamped = pcall(function()
+          ci:call("set_ObjectID", sdk.to_ptr(wrapper))
+        end)
+      end
+      if not stamped and oid and boss then
+        pcall(function() oid:set_field("_SelectedCharacterID", boss) end)
+        L("  fallback: _SelectedCharacterID field set directly")
+      end
+      local sel2 = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+      L("  ObjectID now reads: " .. tostring(sel2) ..
+        " (boss int = 3307750390)")
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      L("  context + initial position set to your ground position")
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      L("  standby requested - the game's own call now proceeds." ..
+        " Watch this spawn: what appears, and does it fight?")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - LIVE: the next Monster spawn presented gets rewritten")
+end
+
+COMMANDS.summon_probe43 = function()
+  sp43_install()
+  local O = SUMMON.obs43
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe43.txt", text) then error("could not write summon_probe43.txt") end
+  return "summon_probe43: " .. tostring(O and O.calls or 0) ..
+    " calls seen, rewritten " .. tostring(O and O.done or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.54: summon probe step 44
+-- Step 43 rode the game's own call and rewrote the
+-- presented container - and the read-back exposed the
+-- trap: after set_ObjectID, the object ID still read the
+-- ORIGINAL character (and part of that read may have been
+-- a stale object - the wrapper local was captured before
+-- the setter ran). The original monster spawned. So the
+-- character at generate time lives somewhere else: the
+-- CommonInfo also has a setCharaID setter (recorded back
+-- in the step 1-2 recon, never used as the stamp), and
+-- the prefab/controller the clone carries was resolved at
+-- clone time. Step 44 rides the call again and does the
+-- forensics at presentation time: dump every field of the
+-- container and its Common/Chara infos whose value equals
+-- the presented character or whose type mentions a
+-- prefab/controller, stamp via setCharaID AND set_ObjectID
+-- with FRESH read-backs, and if a prefab-controller field
+-- exists, swap in the boss's controller from the merged
+-- catalog - the exact object the reference spawner used.
+local function sp44_install()
+  if SUMMON.obs44 then return end
+  local O = { hist = {}, calls = 0, done = false }
+  SUMMON.obs44 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 600 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe44.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe44 (bridge 1.89.67) == find the identity carrier")
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      local oid0 = ci and try(function() return ci:get_field("_ObjectID") end)
+      local sel0 = oid0 and try(function() return oid0:get_field("_SelectedCharacterID") end)
+      local presInt = sel0 and tonumber(tostring(sel0))
+      L("[riding] presented chara=" .. tostring(sel0))
+      local function type_name(o)
+        local td = o and try(function() return o:get_type_definition() end)
+        return td and try(function() return td:get_full_name() end) or "?"
+      end
+      local function hunt(obj, label)
+        if not obj then return end
+        local td = try(function() return obj:get_type_definition() end)
+        local fields = td and try(function() return td:get_fields() end) or {}
+        for _, f in ipairs(fields) do
+          local fname = try(function() return f:get_name() end)
+          local ftd = try(function() return f:get_type() end)
+          local ftname = ftd and try(function() return ftd:get_full_name() end) or ""
+          local interesting = fname and (fname:find("refab") or fname:find("hara") or
+            fname:find("ontroller") or ftname:find("Prefab") or
+            ftname:find("GenerateId") or ftname:find("Character"))
+          if interesting then
+            local v = try(function() return obj:get_field(fname) end)
+            local vs = tostring(v)
+            if presInt and tonumber(vs) == nil and v ~= nil and
+               type(v) == "userdata" then
+              local inner = try(function() return v:get_field("_SelectedCharacterID") end)
+              if inner then vs = vs .. " [inner chara=" .. tostring(inner) .. "]" end
+            end
+            L("  " .. label .. "." .. tostring(fname) .. " : " .. ftname .. " = " .. vs)
+          end
+        end
+      end
+      hunt(cont, "container(" .. type_name(cont) .. ")")
+      hunt(ci, "common")
+      local chi = try(function() return cont:call("get_CharaInfo") end)
+      hunt(chi, "charaInfo")
+      local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+      local boss = nil
+      for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) and
+           try(function() return f:get_name() end) == "ch255000_00" then
+          boss = try(function() return f:get_data(nil) end)
+          break
+        end
+      end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      -- Stamp 1: setCharaID on the CommonInfo.
+      local okC = pcall(function() ci:call("setCharaID", boss) end)
+      local oidA = try(function() return ci:get_field("_ObjectID") end)
+      local selA = oidA and try(function() return oidA:get_field("_SelectedCharacterID") end)
+      L("  setCharaID ok=" .. tostring(okC) .. " -> ObjectID now " .. tostring(selA))
+      -- Stamp 2: set_ObjectID with the manager wrapper; fresh read-back.
+      local wrapper = gm and boss and
+        try(function() return gm:call("getIdWrapper", boss) end)
+      local okO = false
+      if wrapper then
+        okO = pcall(function() ci:call("set_ObjectID", sdk.to_ptr(wrapper)) end)
+      end
+      local oidB = try(function() return ci:get_field("_ObjectID") end)
+      local selB = oidB and try(function() return oidB:get_field("_SelectedCharacterID") end)
+      L("  set_ObjectID ok=" .. tostring(okO) .. " -> ObjectID now " .. tostring(selB))
+      -- Boss prefab controller from the merged catalog.
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      local ec = cc and try(function() return cc:get_field("_EnemyCatalog") end)
+      local merged = ec and try(function() return ec:get_field("<MergedCatalog>k__BackingField") end)
+      local item = merged and boss and
+        try(function() return merged:call("get_Item", boss) end)
+      local refc = item and try(function() return item:get_field("<RefCounter>k__BackingField") end)
+      local bossCtrl = refc and try(function() return refc:call("get_Item") end)
+      L("  boss PrefabController from catalog: " .. tostring(bossCtrl))
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      L("  positions set, standby requested - the game's call proceeds." ..
+        " If a prefab/controller field was listed above, tell me its name" ..
+        " with what appeared.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - LIVE: the next Monster spawn presented gets dissected + stamped")
+end
+
+COMMANDS.summon_probe44 = function()
+  sp44_install()
+  local O = SUMMON.obs44
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe44.txt", text) then error("could not write summon_probe44.txt") end
+  return "summon_probe44: " .. tostring(O and O.calls or 0) ..
+    " calls seen, rewritten " .. tostring(O and O.done or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.55: summon probe step 45
+-- BREAKTHROUGH in step 44, with the familiar defect: riding
+-- the game's generate call and stamping the presented
+-- container through its own setCharaID converted the spawn
+-- - a Medusa appeared - but inert: no attacks, cannot be
+-- targeted. The same syndrome as the factory route, now
+-- proven independent of container provenance: real table
+-- clone, real registration, still no combat self. So the
+-- missing piece is not where the container comes from; it
+-- is something a natural spawn carries or receives that a
+-- converted one does not. Step 45 gathers the diff data.
+-- At ride time it dumps the container's FULL sub-infos
+-- (init type, option flags, every Chara/Status/Special
+-- field). On the NEXT press, with the Medusa standing in
+-- the world, it censuses the character registries, finds
+-- the live Medusa character and one natural enemy, and
+-- dumps their think/combat/target-flavored fields side by
+-- side - hunting the dormant switch.
+local function sp45_install()
+  if SUMMON.obs45 then return end
+  local O = { hist = {}, calls = 0, done = false }
+  SUMMON.obs45 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 900 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe45.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe45 (bridge 1.89.67) == convert, then diff the result")
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local function dump_all(obj, label)
+    if not obj then
+      L("  " .. label .. ": nil")
+      return
+    end
+    local td = try(function() return obj:get_type_definition() end)
+    local fields = td and try(function() return td:get_fields() end) or {}
+    local parts = {}
+    for _, f in ipairs(fields) do
+      local fname = try(function() return f:get_name() end)
+      if fname and not fname:find("BackingField") then
+        local v = try(function() return obj:get_field(fname) end)
+        local vs
+        if v == nil then
+          vs = "nil"
+        elseif type(v) == "userdata" then
+          vs = tostring(v)
+          local inner = try(function() return v:get_field("_SelectedCharacterID") end)
+          if inner then vs = "chara " .. tostring(inner) end
+        else
+          vs = tostring(v)
+        end
+        parts[#parts + 1] = fname .. "=" .. vs
+      end
+    end
+    L("  " .. label .. " (" .. #parts .. " fields):")
+    L("    " .. table.concat(parts, " | "))
+  end
+  O.dump_all = dump_all
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      local oid0 = ci and try(function() return ci:get_field("_ObjectID") end)
+      local sel0 = oid0 and try(function() return oid0:get_field("_SelectedCharacterID") end)
+      L("[riding] presented chara=" .. tostring(sel0))
+      dump_all(ci, "common")
+      dump_all(try(function() return cont:call("get_CharaInfo") end), "charaInfo")
+      dump_all(try(function() return cont:call("get_StatusInfo") end), "statusInfo")
+      dump_all(try(function() return cont:call("get_SpecialInfo") end), "specialInfo")
+      local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+      local boss = nil
+      for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) and
+           try(function() return f:get_name() end) == "ch255000_00" then
+          boss = try(function() return f:get_data(nil) end)
+          break
+        end
+      end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local okC = pcall(function() ci:call("setCharaID", boss) end)
+      local oidA = try(function() return ci:get_field("_ObjectID") end)
+      local selA = oidA and try(function() return oidA:get_field("_SelectedCharacterID") end)
+      L("  setCharaID ok=" .. tostring(okC) .. " -> ObjectID now " .. tostring(selA))
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      L("  converted + positioned + standby - the Medusa should appear." ..
+        " Let her stand, then press the probe again for the character diff.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) ..
+    " - LIVE: next Monster spawn is converted; press again after she appears")
+end
+
+local function sp45_diff()
+  local O = SUMMON.obs45
+  local L = O.log
+  L("== character census (looking for the live Medusa + a natural) ==")
+  local function chara_of(ch)
+    local probes = {
+      function() return ch:call("get_CharacterID") end,
+      function() return ch:get_field("_CharacterID") end,
+      function() return ch:get_field("<CharacterID>k__BackingField") end,
+      function() return ch:call("get_CharaID") end,
+      function() return ch:get_field("_CharaID") end,
+    }
+    for _, p in ipairs(probes) do
+      local v = try(p)
+      if v ~= nil then return v end
+    end
+    return nil
+  end
+  O.chara_of = chara_of
+  local function dump_char(ch, label)
+    local td = try(function() return ch:get_type_definition() end)
+    local fields = td and try(function() return td:get_fields() end) or {}
+    local hits = {}
+    for _, f in ipairs(fields) do
+      local fname = try(function() return f:get_name() end)
+      if fname and (fname:find("Think") or fname:find("think") or
+         fname:find("Combat") or fname:find("combat") or
+         fname:find("Target") or fname:find("target") or
+         fname:find("Hit") or fname:find("Active") or
+         fname:find("Enable") or fname:find("Sleep") or
+         fname:find("Wake") or fname:find("Generate") or
+         fname:find("Register") or fname:find("Dead") or
+         fname:find("Alive")) then
+        local v = try(function() return ch:get_field(fname) end)
+        hits[#hits + 1] = fname .. "=" .. tostring(v)
+      end
+    end
+    L("  " .. label .. " chara=" .. tostring(chara_of(ch)) ..
+      " type=" .. tostring(td and try(function() return td:get_full_name() end)))
+    L("    " .. (#hits > 0 and table.concat(hits, " | ") or "(no matching fields)"))
+  end
+  O.dump_char = dump_char
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local function scan_holder(holder, label)
+    if not holder then
+      L("  " .. label .. ": singleton nil")
+      return
+    end
+    local td = try(function() return holder:get_type_definition() end)
+    local fields = td and try(function() return td:get_fields() end) or {}
+    for _, f in ipairs(fields) do
+      local fname = try(function() return f:get_name() end)
+      local ftd = try(function() return f:get_type() end)
+      local ftname = ftd and try(function() return ftd:get_full_name() end) or ""
+      if fname and (ftname:find("Character") or fname:find("hara") or
+         fname:find("nstance") or fname:find("nemy")) then
+        local v = try(function() return holder:get_field(fname) end)
+        local n = v and (try(function() return v:call("get_Length") end) or
+                         try(function() return v:call("get_Count") end))
+        L("  " .. label .. "." .. fname .. " : " .. ftname ..
+          " = " .. tostring(v) .. (n and (" len=" .. tostring(n)) or ""))
+        if v and n and n > 0 and n <= 64 then
+          for i = 0, n - 1 do
+            local el = try(function() return v:call("get_Item", i) end) or
+                       try(function() return v:call("GetValue", i) end)
+            if el then
+              local cv = chara_of(el)
+              if cv ~= nil then
+                L("    [" .. i .. "] chara=" .. tostring(cv) .. " obj=" .. tostring(el))
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  scan_holder(cm, "CharacterManager")
+  scan_holder(em, "EnemyManager")
+  -- Direct lookups by category + boss id.
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local boss = nil
+  for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+    if try(function() return f:is_static() end) and
+       try(function() return f:get_name() end) == "ch255000_00" then
+      boss = try(function() return f:get_data(nil) end)
+      break
+    end
+  end
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  for _, holder in ipairs({ cm, pm }) do
+    if holder and boss then
+      local got = try(function()
+        return holder:call("getInstanceChara", 3, boss)
+      end)
+      L("  getInstanceChara(3, boss) on " ..
+        tostring(holder:get_type_definition():get_full_name()) ..
+        " -> " .. tostring(got))
+      if got then dump_char(got, "MEDUSA") end
+    end
+  end
+  L("== census done - if the Medusa was found, her fields are above;" ..
+    " compare with any natural enemy dump ==")
+end
+
+COMMANDS.summon_probe45 = function()
+  sp45_install()
+  local O = SUMMON.obs45
+  if O and O.done and not O.diffed then
+    O.diffed = true
+    sp45_diff()
+  end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe45.txt", text) then error("could not write summon_probe45.txt") end
+  return "summon_probe45: converted " .. tostring(O and O.done or false) ..
+    ", diffed " .. tostring(O and O.diffed or false)
+end
+
+
+end
+do
+---------------------------------------------------------------- v1.89.56: summon probe step 46
+-- Step 45's data: the converted container is healthy on
+-- paper (think-stop false, wander on, disable flag 255,
+-- status 5) and the Medusa character EXISTS with her full
+-- component set - Hit, CombatStateControl, LockOnTarget,
+-- even her PetrificationDeadController. She is in the
+-- instance registry (PawnManager.getInstanceChara found
+-- her). What the census could not answer: is she in the
+-- ENEMY registry (EnemyManager._EnemyList, the list
+-- targeting and combat actually enumerate), and how does
+-- her internal state compare to a natural enemy's? Step 46
+-- rides and converts as before; on the next press it walks
+-- _EnemyList (identifying each element through its own
+-- GenerateInfo, the reliable route), finds her and one
+-- natural, and dumps both characters completely - every
+-- field, plus the CombatStateControl / Hit /
+-- GenerateSetting sub-objects - and censuses her type's
+-- activation-flavored methods for the step after.
+local function sp46_install()
+  if SUMMON.obs46 then return end
+  local O = { hist = {}, calls = 0, done = false }
+  SUMMON.obs46 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe46.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe46 (bridge 1.89.67) == compare her to a natural")
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+      local boss = nil
+      for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) and
+           try(function() return f:get_name() end) == "ch255000_00" then
+          boss = try(function() return f:get_data(nil) end)
+          break
+        end
+      end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local okC = pcall(function() ci:call("setCharaID", boss) end)
+      local oidA = try(function() return ci:get_field("_ObjectID") end)
+      local selA = oidA and try(function() return oidA:get_field("_SelectedCharacterID") end)
+      L("[riding] setCharaID ok=" .. tostring(okC) .. " -> ObjectID now " .. tostring(selA))
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      L("  converted - let her appear, stay near her, then press again.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) .. " - LIVE")
+end
+
+local function sp46_compare()
+  local O = SUMMON.obs46
+  local L = O.log
+  L("== enemy registry comparison ==")
+  local function chara_via_geninfo(ch)
+    local gi = try(function() return ch:get_field("<GenerateInfo>k__BackingField") end)
+      or try(function() return ch:call("get_GenerateInfo") end)
+    local ci = gi and try(function() return gi:call("get_CommonInfo") end)
+    local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+    local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+    return sel and tonumber(tostring(sel)) or nil, gi, ci
+  end
+  O.chara_via_geninfo = chara_via_geninfo
+  local function val_str(v)
+    if v == nil then return "nil" end
+    if type(v) == "userdata" then
+      local td = try(function() return v:get_type_definition() end)
+      local tn = td and try(function() return td:get_full_name() end) or "obj"
+      return "<" .. tn .. ">"
+    end
+    return tostring(v)
+  end
+  O.val_str = val_str
+  local function dump_full(ch, label)
+    local td = try(function() return ch:get_type_definition() end)
+    L("  --- " .. label .. " type=" ..
+      tostring(td and try(function() return td:get_full_name() end)))
+    local fields = td and try(function() return td:get_fields() end) or {}
+    local parts = {}
+    for _, f in ipairs(fields) do
+      local fname = try(function() return f:get_name() end)
+      if fname then
+        local v = try(function() return ch:get_field(fname) end)
+        parts[#parts + 1] = fname .. "=" .. val_str(v)
+      end
+    end
+    L("    " .. table.concat(parts, " | "))
+    for _, sub in ipairs({ "<CombatStateControl>k__BackingField", "<Hit>k__BackingField",
+        "<GenerateSetting>k__BackingField", "<LockOnTarget>k__BackingField" }) do
+      local so = try(function() return ch:get_field(sub) end)
+      if so then
+        local std = try(function() return so:get_type_definition() end)
+        local sf = std and try(function() return std:get_fields() end) or {}
+        local sp = {}
+        for _, f in ipairs(sf) do
+          local fn = try(function() return f:get_name() end)
+          if fn then
+            local v = try(function() return so:get_field(fn) end)
+            if type(v) ~= "userdata" or v == nil then
+              sp[#sp + 1] = fn .. "=" .. val_str(v)
+            end
+          end
+        end
+        L("    " .. sub .. " scalars: " .. table.concat(sp, " | "))
+      else
+        L("    " .. sub .. ": nil")
+      end
+    end
+  end
+  O.dump_full = dump_full
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  local medusa, natural = nil, nil
+  if list and n then
+    for i = 0, math.min(n, 40) - 1 do
+      local el = try(function() return list:call("get_Item", i) end)
+      if el then
+        local cv = chara_via_geninfo(el)
+        local etd = try(function() return el:get_type_definition() end)
+        L("    [" .. i .. "] type=" ..
+          tostring(etd and try(function() return etd:get_full_name() end)) ..
+          " chara=" .. tostring(cv))
+        if cv == 3307750390 and not medusa then medusa = el end
+        if cv ~= nil and cv ~= 3307750390 and not natural then natural = el end
+      end
+    end
+  end
+  L("  Medusa in _EnemyList: " .. tostring(medusa ~= nil))
+  if not medusa then
+    local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local boss = nil
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == "ch255000_00" then
+        boss = try(function() return f:get_data(nil) end)
+        break
+      end
+    end
+    medusa = pm and boss and try(function()
+      return pm:call("getInstanceChara", 3, boss)
+    end)
+    L("  Medusa via getInstanceChara fallback: " .. tostring(medusa))
+  end
+  if medusa then dump_full(medusa, "MEDUSA") end
+  if natural then dump_full(natural, "NATURAL") end
+  if medusa then
+    local td = try(function() return medusa:get_type_definition() end)
+    local methods = td and try(function() return td:get_methods() end) or {}
+    local hits = {}
+    for _, mm in ipairs(methods) do
+      local mn = try(function() return mm:get_name() end)
+      if mn and (mn:find("Think") or mn:find("Combat") or mn:find("Begin") or
+         mn:find("Wake") or mn:find("Active") or mn:find("Regist") or
+         mn:find("Start") or mn:find("Enable")) then
+        hits[#hits + 1] = mn
+      end
+    end
+    L("  Medusa type activation-flavored methods (" .. #hits .. "): " ..
+      table.concat(hits, ", "))
+  end
+  L("== comparison done ==")
+end
+
+COMMANDS.summon_probe46 = function()
+  sp46_install()
+  local O = SUMMON.obs46
+  if O and O.done and not O.compared then
+    O.compared = true
+    sp46_compare()
+  end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe46.txt", text) then error("could not write summon_probe46.txt") end
+  return "summon_probe46: converted " .. tostring(O and O.done or false) ..
+    ", compared " .. tostring(O and O.compared or false)
+end
+
+end
+do
+---------------------------------------------------------------- v1.89.57: summon probe step 47
+-- Step 46, corrected reading: the Medusa IS in the enemy
+-- list (element [25], type app.Ch255000 - the step's own
+-- chara identifier failed on every element, so its
+-- "not in list" line was a false negative). Her character
+-- object is complete: boss flags set, hit controller
+-- started, post-initialize finished, AI organs present.
+-- One original-species value still rides her container:
+-- the InitSetType (250 in step 45 - the donor species'
+-- opening setup). If the opening setup is what hands a
+-- character its brain, a Medusa built with another
+-- species' init never gets hers. Step 47 enumerates the
+-- InitSetType members naming family 255, stamps the first
+-- one that is NOT the banned SummonAppear (203 - crashed
+-- in step 33; scenario inits stay banned) alongside
+-- setCharaID, and on the next press dumps her AI organs
+-- (decision maker, blackboard, hate, sensor) beside a
+-- natural enemy's, with both characters' generate-info
+-- init values for comparison.
+local function sp47_install()
+  if SUMMON.obs47 then return end
+  local O = { hist = {}, calls = 0, done = false }
+  SUMMON.obs47 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe47.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe47 (bridge 1.89.67) == the init experiment + AI diff")
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      local itd = try(function() return sdk.find_type_definition("app.GenerateDefine.InitSetTypeEnum") end)
+      local chosen, chosenName = nil, nil
+      local seen255 = {}
+      for _, f in ipairs(itd and try(function() return itd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) then
+          local fn = try(function() return f:get_name() end)
+          if fn and fn:find("255") then
+            local d = try(function() return f:get_data(nil) end)
+            local dv = d and tonumber(tostring(d))
+            seen255[#seen255 + 1] = fn .. "=" .. tostring(dv)
+            if not fn:find("SummonAppear") and chosen == nil and dv ~= nil then
+              chosen, chosenName = dv, fn
+            end
+          end
+        end
+      end
+      L("[riding] InitSetType members naming 255: " ..
+        (#seen255 > 0 and table.concat(seen255, ", ") or "NONE"))
+      local origInit = ci and try(function() return ci:get_field("_InitSetType") end)
+      L("  container init before: " .. tostring(origInit))
+      if chosen ~= nil then
+        local okI = pcall(function() ci:call("setInitSetType", chosen) end)
+        local nowInit = try(function() return ci:get_field("_InitSetType") end)
+        L("  setInitSetType(" .. chosenName .. "=" .. chosen .. ") ok=" ..
+          tostring(okI) .. " -> init now " .. tostring(nowInit))
+      else
+        L("  no non-banned 255 init exists - container init left as-is")
+      end
+      local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+      local boss = nil
+      for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) and
+           try(function() return f:get_name() end) == "ch255000_00" then
+          boss = try(function() return f:get_data(nil) end)
+          break
+        end
+      end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local okC = pcall(function() ci:call("setCharaID", boss) end)
+      local oidA = try(function() return ci:get_field("_ObjectID") end)
+      local selA = oidA and try(function() return oidA:get_field("_SelectedCharacterID") end)
+      L("  setCharaID ok=" .. tostring(okC) .. " -> ObjectID now " .. tostring(selA))
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      L("  converted - watch her closely this time: does she fight?" ..
+        " Then press again for the AI diff.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) .. " - LIVE")
+end
+
+local function sp47_compare()
+  local O = SUMMON.obs47
+  local L = O.log
+  L("== AI organ comparison ==")
+  local function val_str(v)
+    if v == nil then return "nil" end
+    if type(v) == "userdata" then
+      local td = try(function() return v:get_type_definition() end)
+      local tn = td and try(function() return td:get_full_name() end) or "obj"
+      return "<" .. tn .. ">"
+    end
+    return tostring(v)
+  end
+  local function sub_scalars(ch, field, label)
+    local so = try(function() return ch:get_field(field) end)
+    if not so then
+      L("    " .. label .. ": nil")
+      return
+    end
+    local std = try(function() return so:get_type_definition() end)
+    local sf = std and try(function() return std:get_fields() end) or {}
+    local sp = {}
+    for _, f in ipairs(sf) do
+      local fn = try(function() return f:get_name() end)
+      if fn then
+        local v = try(function() return so:get_field(fn) end)
+        if type(v) ~= "userdata" or v == nil then
+          sp[#sp + 1] = fn .. "=" .. val_str(v)
+        end
+      end
+    end
+    L("    " .. label .. " (" ..
+      tostring(std and try(function() return std:get_full_name() end)) .. "): " ..
+      table.concat(sp, " | "))
+  end
+  local function geninfo_line(ch, label)
+    local gi = try(function() return ch:get_field("<GenerateInfo>k__BackingField") end)
+    local ci = gi and try(function() return gi:call("get_CommonInfo") end)
+    if not ci then
+      L("    " .. label .. " GenerateInfo: unavailable")
+      return
+    end
+    local oid = try(function() return ci:get_field("_ObjectID") end)
+    local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+    L("    " .. label .. " GenerateInfo: chara=" .. tostring(sel) ..
+      " init=" .. tostring(try(function() return ci:get_field("_InitSetType") end)) ..
+      " option=" .. tostring(try(function() return ci:get_field("_Option") end)) ..
+      " loadArea=" .. tostring(try(function() return ci:get_field("_LoadArea") end)))
+  end
+  local function dump_char(ch, label)
+    L("  --- " .. label)
+    geninfo_line(ch, label)
+    sub_scalars(ch, "<AIDecisionMaker>k__BackingField", label .. " AIDecisionMaker")
+    sub_scalars(ch, "<AIBlackBoardController>k__BackingField", label .. " AIBlackBoard")
+    sub_scalars(ch, "<HateSystem>k__BackingField", label .. " HateSystem")
+    sub_scalars(ch, "<SensorController>k__BackingField", label .. " Sensor")
+    sub_scalars(ch, "<CombatStateControl>k__BackingField", label .. " CombatState")
+    local td = try(function() return ch:get_type_definition() end)
+    local fields = td and try(function() return td:get_fields() end) or {}
+    local picks = {}
+    for _, f in ipairs(fields) do
+      local fn = try(function() return f:get_name() end)
+      if fn and (fn:find("AITown") or fn:find("AILocal") or fn:find("IsUpdated") or
+         fn:find("IsBoss") or fn:find("AISituation") or fn:find("CombatState") or
+         fn:find("Think") or fn:find("GenerateSetting")) then
+        local v = try(function() return ch:get_field(fn) end)
+        picks[#picks + 1] = fn .. "=" .. val_str(v)
+      end
+    end
+    L("    " .. label .. " picks: " .. table.concat(picks, " | "))
+  end
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  local medusa, natural = nil, nil
+  if list and n then
+    for i = 0, math.min(n, 40) - 1 do
+      local el = try(function() return list:call("get_Item", i) end)
+      if el then
+        local etd = try(function() return el:get_type_definition() end)
+        local tn = etd and try(function() return etd:get_full_name() end)
+        if tn == "app.Ch255000" and not medusa then medusa = el end
+        if tn ~= "app.Ch255000" and tn ~= nil and not natural then natural = el end
+      end
+    end
+  end
+  L("  Medusa element found: " .. tostring(medusa ~= nil) ..
+    " | natural element found: " .. tostring(natural ~= nil))
+  if medusa then dump_char(medusa, "MEDUSA") end
+  if natural then dump_char(natural, "NATURAL") end
+  L("== comparison done ==")
+end
+
+COMMANDS.summon_probe47 = function()
+  sp47_install()
+  local O = SUMMON.obs47
+  if O and O.done and not O.compared then
+    O.compared = true
+    sp47_compare()
+  end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe47.txt", text) then error("could not write summon_probe47.txt") end
+  return "summon_probe47: converted " .. tostring(O and O.done or false) ..
+    ", compared " .. tostring(O and O.compared or false)
+end
+end
+
+do
+---------------------------------------------------------------- v1.89.58: summon probe step 48
+-- Step 47 reframed everything: the ONLY InitSetType naming
+-- family 255 is Ch255000_11_SummonAppear (203) - the
+-- Medusa has no ordinary species init at all. She is an
+-- event boss; her lair appearance is scripted, and it is
+-- entirely possible her brain is switched on by that
+-- script, not by the generate pipeline. Every spawn test
+-- since step 25 used her. Step 48 changes the test
+-- subject: ch250000_00, the Cyclops - a normal field boss
+-- found all over the map, whose family should carry an
+-- ordinary init. Same ride, same stamps (character +
+-- first non-scenario family init if one exists). If a
+-- converted Cyclops FIGHTS, the mechanism works and the
+-- Medusa was a cursed pick. The comparison stage is also
+-- fixed: enemy-list elements are Ch-class objects that do
+-- not expose the Character fields probed in step 47 (both
+-- sides read nil identically - a probe bug); characters
+-- are now reached through getInstanceChara, the route that
+-- worked in step 46.
+local BOSS_CODE = "ch250000_00"
+local BOSS_FAMILY = "250"
+local function sp48_install()
+  if SUMMON.obs48 then return end
+  local O = { hist = {}, calls = 0, done = false }
+  SUMMON.obs48 = O
+  local function L(x)
+    O.hist[#O.hist + 1] = x
+    if #O.hist > 1200 then table.remove(O.hist, 1) end
+    wr(DIR .. "summon_probe48.txt", table.concat(O.hist, "\n"))
+  end
+  O.log = L
+  L("== summon_probe48 (bridge 1.89.67) == a different boss: " .. BOSS_CODE)
+  local function find_enum(code)
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == code then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+  O.find_enum = find_enum
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then
+    L("requestGenerate method not found - hook NOT installed")
+    return
+  end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      O.calls = O.calls + 1
+      if O.done then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      O.done = true
+      local itd = try(function() return sdk.find_type_definition("app.GenerateDefine.InitSetTypeEnum") end)
+      local chosen, chosenName = nil, nil
+      local seen = {}
+      for _, f in ipairs(itd and try(function() return itd:get_fields() end) or {}) do
+        if try(function() return f:is_static() end) then
+          local fn = try(function() return f:get_name() end)
+          if fn and fn:find(BOSS_FAMILY) then
+            local d = try(function() return f:get_data(nil) end)
+            local dv = d and tonumber(tostring(d))
+            seen[#seen + 1] = fn .. "=" .. tostring(dv)
+            if not fn:find("Summon") and not fn:find("Event") and
+               chosen == nil and dv ~= nil then
+              chosen, chosenName = dv, fn
+            end
+          end
+        end
+      end
+      L("[riding] InitSetType members naming " .. BOSS_FAMILY .. ": " ..
+        (#seen > 0 and table.concat(seen, ", ") or "NONE"))
+      local origInit = ci and try(function() return ci:get_field("_InitSetType") end)
+      L("  container init before: " .. tostring(origInit))
+      if chosen ~= nil then
+        local okI = pcall(function() ci:call("setInitSetType", chosen) end)
+        local nowInit = try(function() return ci:get_field("_InitSetType") end)
+        L("  setInitSetType(" .. chosenName .. "=" .. chosen .. ") ok=" ..
+          tostring(okI) .. " -> init now " .. tostring(nowInit))
+      else
+        L("  no ordinary family init - container init left as-is")
+      end
+      local boss = find_enum(BOSS_CODE)
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local okC = pcall(function() ci:call("setCharaID", boss) end)
+      local oidA = try(function() return ci:get_field("_ObjectID") end)
+      local selA = oidA and try(function() return oidA:get_field("_SelectedCharacterID") end)
+      L("  setCharaID(" .. BOSS_CODE .. ") ok=" .. tostring(okC) ..
+        " -> ObjectID now " .. tostring(selA))
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      L("  converted - a Cyclops should appear at your feet." ..
+        " Does he move, attack, react? Can you target him?" ..
+        " Then press again for the comparison.")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  L("hook installed: " .. tostring(ok) .. " - LIVE")
+end
+
+local function sp48_compare()
+  local O = SUMMON.obs48
+  local L = O.log
+  L("== comparison via getInstanceChara ==")
+  local function val_str(v)
+    if v == nil then return "nil" end
+    if type(v) == "userdata" then
+      local td = try(function() return v:get_type_definition() end)
+      local tn = td and try(function() return td:get_full_name() end) or "obj"
+      return "<" .. tn .. ">"
+    end
+    return tostring(v)
+  end
+  local function sub_scalars(ch, field, label)
+    local so = try(function() return ch:get_field(field) end)
+    if not so then
+      L("    " .. label .. ": nil")
+      return
+    end
+    local std = try(function() return so:get_type_definition() end)
+    local sf = std and try(function() return std:get_fields() end) or {}
+    local sp = {}
+    for _, f in ipairs(sf) do
+      local fn = try(function() return f:get_name() end)
+      if fn then
+        local v = try(function() return so:get_field(fn) end)
+        if type(v) ~= "userdata" or v == nil then
+          sp[#sp + 1] = fn .. "=" .. val_str(v)
+        end
+      end
+    end
+    L("    " .. label .. ": " .. table.concat(sp, " | "))
+  end
+  local function dump_char(ch, label)
+    if not ch then
+      L("  --- " .. label .. ": character not found")
+      return
+    end
+    L("  --- " .. label .. " CharacterID=" ..
+      tostring(try(function() return ch:get_field("CharacterID") end)) ..
+      " IsBoss=" .. tostring(try(function()
+        return ch:get_field("<IsBoss>k__BackingField") end)) ..
+      " IsPostInitializeFinished=" .. tostring(try(function()
+        return ch:get_field("<IsPostInitializeFinished>k__BackingField") end)) ..
+      " AITownArea=" .. tostring(try(function()
+        return ch:get_field("<AITownArea>k__BackingField") end)) ..
+      " AILocalArea=" .. tostring(try(function()
+        return ch:get_field("<AILocalArea>k__BackingField") end)) ..
+      " DistanceXZSq=" .. tostring(try(function()
+        return ch:get_field("<DistanceXZSqFromPlayer>k__BackingField") end)))
+    sub_scalars(ch, "<AIDecisionMaker>k__BackingField", label .. " AIDecisionMaker")
+    sub_scalars(ch, "<AIBlackBoardController>k__BackingField", label .. " AIBlackBoard")
+    sub_scalars(ch, "<HateSystem>k__BackingField", label .. " HateSystem")
+    sub_scalars(ch, "<SensorController>k__BackingField", label .. " Sensor")
+    sub_scalars(ch, "<CombatStateControl>k__BackingField", label .. " CombatState")
+    sub_scalars(ch, "<Hit>k__BackingField", label .. " Hit")
+  end
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local bossEnum = O.find_enum(BOSS_CODE)
+  local bossChar = pm and bossEnum and try(function()
+    return pm:call("getInstanceChara", 3, bossEnum)
+  end)
+  dump_char(bossChar, "CYCLOPS")
+  -- Natural: first enemy-list element of another species,
+  -- reached through its own _00 enum.
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  local natChar = nil
+  if list and n then
+    for i = 0, math.min(n, 40) - 1 do
+      local el = try(function() return list:call("get_Item", i) end)
+      local etd = el and try(function() return el:get_type_definition() end)
+      local tn = etd and try(function() return etd:get_full_name() end)
+      if tn and tn ~= "app.Ch250000" then
+        local fam = tn:match("app%.(Ch%d+)")
+        if fam then
+          local code = "ch" .. fam:sub(3) .. "_00"
+          local e = O.find_enum(code)
+          if e and pm then
+            natChar = try(function()
+              return pm:call("getInstanceChara", 3, e)
+            end)
+            if natChar then
+              L("  natural picked: " .. tn .. " via " .. code)
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  dump_char(natChar, "NATURAL")
+  L("== comparison done ==")
+end
+
+COMMANDS.summon_probe48 = function()
+  sp48_install()
+  local O = SUMMON.obs48
+  if O and O.done and not O.compared then
+    O.compared = true
+    sp48_compare()
+  end
+  local text = O and table.concat(O.hist, "\n") or ""
+  if not wr(DIR .. "summon_probe48.txt", text) then error("could not write summon_probe48.txt") end
+  return "summon_probe48: converted " .. tostring(O and O.done or false) ..
+    ", compared " .. tostring(O and O.compared or false)
+end
+end
+
+do
+---------------------------------------------------------------- v1.89.60: summon probe step 49
+-- Reports from the field on the shipped Summon Boss: some
+-- converted bosses cannot be damaged. The conversion recipe
+-- is species-general, so the gate is likely species data:
+-- an invincibility/damage flag the character carries, a
+-- damage-collision switch, or an encounter-script gate like
+-- the Medusa's brain. Step 49 is read-only: AFTER a boss has
+-- been summoned with the normal Summon button, it finds the
+-- live boss character (IsBoss) and one natural enemy and
+-- dumps their damage-gate state side by side - Hit
+-- controller scalars, character damage flags, the generate
+-- info the conversion actually used, and combat uptake.
+local function sp49_run()
+  local hist = {}
+  local function L(x)
+    hist[#hist + 1] = x
+    wr(DIR .. "summon_probe49.txt", table.concat(hist, "\n"))
+  end
+  L("== summon_probe49 (bridge 1.89.67) == damage-gate diff")
+  local function find_enum(code)
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) and
+         try(function() return f:get_name() end) == code then
+        return try(function() return f:get_data(nil) end)
+      end
+    end
+    return nil
+  end
+  local function hit_scalars(ch, label)
+    local hit = try(function() return ch:get_field("<Hit>k__BackingField") end)
+    if not hit then
+      L("  " .. label .. " Hit: nil")
+      return
+    end
+    local keys = { "<IsInvincible>k__BackingField", "<IsDamageZero>k__BackingField",
+      "<IsUseAttack>k__BackingField", "<IsNoDie>k__BackingField",
+      "<IsAttackNoDie>k__BackingField", "<DamageCollisionOff>k__BackingField",
+      "<PressCollisionOff>k__BackingField", "<IsStarted>k__BackingField",
+      "<ReducedMaxHp>k__BackingField", "<GuardHp>k__BackingField",
+      "<HasTacticalAttackNoticeInfo>k__BackingField", "_IsProcDistRegistered",
+      "IsRegistColliderTrackOnStart", "<TotalFrameDamage>k__BackingField",
+      "SetDamageInfoFrameCount" }
+    local parts = {}
+    for _, k in ipairs(keys) do
+      parts[#parts + 1] = k:gsub("<", ""):gsub(">k__BackingField", "") ..
+        "=" .. tostring(try(function() return hit:get_field(k) end))
+    end
+    L("  " .. label .. " Hit: " .. table.concat(parts, " | "))
+  end
+  local function dump_char(ch, label)
+    if not ch then
+      L("  --- " .. label .. ": not found")
+      return
+    end
+    local function gf(n)
+      return try(function() return ch:get_field(n) end)
+    end
+    L("  --- " .. label .. " CharacterID=" .. tostring(gf("CharacterID")) ..
+      " IsBoss=" .. tostring(gf("<IsBoss>k__BackingField")) ..
+      " IsPostInitializeFinished=" ..
+      tostring(gf("<IsPostInitializeFinished>k__BackingField")) ..
+      " IsNoHitPlayerAttack=" ..
+      tostring(gf("<IsNoHitPlayerAttack>k__BackingField")) ..
+      " IsImmortality=" .. tostring(gf("<IsImmortality>k__BackingField")) ..
+      " IsEnablePawnHitFilter=" ..
+      tostring(gf("<IsEnablePawnHitFilter>k__BackingField")))
+    local dc = gf("<DamageCalculator>k__BackingField")
+    local dctd = dc and try(function() return dc:get_type_definition() end)
+    L("    DamageCalculator=" ..
+      tostring(dctd and try(function() return dctd:get_full_name() end) or dc))
+    local gi = gf("<GenerateInfo>k__BackingField")
+    local ci = gi and try(function() return gi:call("get_CommonInfo") end)
+    if ci then
+      L("    GenerateInfo: init=" ..
+        tostring(try(function() return ci:get_field("_InitSetType") end)) ..
+        " option=" ..
+        tostring(try(function() return ci:get_field("_Option") end)) ..
+        " loadArea=" ..
+        tostring(try(function() return ci:get_field("_LoadArea") end)))
+      local chi = try(function() return gi:call("get_CharaInfo") end)
+      if chi then
+        L("    CharaInfo: IsForceCombat=" ..
+          tostring(try(function() return chi:get_field("_IsForceCombat") end)) ..
+          " IsThinkStop=" ..
+          tostring(try(function() return chi:get_field("_IsThinkStop") end)) ..
+          " GenerateDisableFlag=" ..
+          tostring(try(function() return chi:get_field("_GenerateDisableFlag") end)))
+      end
+    end
+    local hate = gf("<HateSystem>k__BackingField")
+    if hate then
+      L("    HateSystem: IsBossCharacter=" ..
+        tostring(try(function() return hate:get_field("_IsBossCharacter") end)) ..
+        " HateRequestCount=" ..
+        tostring(try(function() return hate:get_field("_HateRequestCount") end)) ..
+        " PrevEnemiesCount=" ..
+        tostring(try(function() return hate:get_field("_PrevEnemiesCount") end)))
+    end
+    hit_scalars(ch, label)
+  end
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  local bossChar, natChar = nil, nil
+  if list and n and pm then
+    for i = 0, math.min(n, 40) - 1 do
+      local el = try(function() return list:call("get_Item", i) end)
+      local etd = el and try(function() return el:get_type_definition() end)
+      local tn = etd and try(function() return etd:get_full_name() end)
+      local fam = tn and tn:match("app%.Ch(%d+)")
+      if fam then
+        local e = find_enum("ch" .. fam .. "_00")
+        local ch = e and try(function()
+          return pm:call("getInstanceChara", 3, e)
+        end)
+        if ch then
+          local isBoss = try(function()
+            return ch:get_field("<IsBoss>k__BackingField")
+          end)
+          if isBoss == true and not bossChar then
+            bossChar = ch
+            L("  boss found: " .. tn)
+          elseif isBoss ~= true and not natChar then
+            natChar = ch
+            L("  natural picked: " .. tn)
+          end
+        end
+      end
+      if bossChar and natChar then break end
+    end
+  end
+  dump_char(bossChar, "BOSS")
+  dump_char(natChar, "NATURAL")
+  L("== diff done - send this log plus WHICH boss you summoned ==")
+  return hist
+end
+
+COMMANDS.summon_probe49 = function()
+  local hist = sp49_run()
+  return "summon_probe49: " .. (hist[#hist] or "done")
+end
+end
+
+---------------------------------------------------------------- v1.89.63: summon boss (the ride - productized probe 48, restored verbatim from 1.89.59; the v3 direct factory spawn of 1.89.61 CRASHED in live testing and is banned)
+-- The mechanism the 48-step probe campaign proved (and the one
+-- that finally produced a FIGHTING boss in-game, 2026-10-23):
+-- do not build containers and do not edit tables - RIDE the
+-- game's own requestGenerate. A hook fires just before the
+-- game generates a real enemy spawn; the presented container
+-- (genuinely registered, real table identity, already queued
+-- with the distributor) is restamped in place:
+--   setInitSetType(the species' own base init, e.g. Ch250 -
+--     found by name in InitSetTypeEnum; species-flavored
+--     fallback; Common(1) last resort)
+--   setCharaID(the picked variant, e.g. ch250000_00)
+--   context + initial position = the player's ground
+--     position, context angle = the player's rotation
+--   prefab standby requested
+-- then the game's call proceeds and the pipeline produces a
+-- real boss: AI, targeting, hit reception, the works.
+-- Known exception: the Medusa (ch255000) has NO base init -
+-- her only family init is the scripted SummonAppear, so she
+-- is event-locked by design and converts to a statue; other
+-- bosses fight. (Her fallback here is Common.)
+-- summon_boss|<code> ARMS one conversion per call; the next
+-- enemy spawn presented converts. Converted bosses are the
+-- donor spawn for save purposes - nothing fabricated enters
+-- the save path, and area reloads restore the originals.
+local summon_log = {}
+local function SL(x)
+  summon_log[#summon_log + 1] = x
+  wr(DIR .. "summon_log.txt", table.concat(summon_log, "\n"))
+end
+
+local function enum_value(tname, fname)
+  local td = try(function() return sdk.find_type_definition(tname) end)
+  if not td then return nil end
+  local fs = try(function() return td:get_fields() end) or {}
+  for _, f in ipairs(fs) do
+    local fn = try(function() return f:get_name() end)
+    if fn == fname then
+      return try(function() return f:get_data(nil) end)
+    end
+  end
+  return nil
+end
+
+local function summon_ride_install()
+  if SUMMON.rideHook then return end
+  local gmtd = try(function() return sdk.find_type_definition("app.GenerateManager") end)
+  local m = gmtd and try(function() return gmtd:get_method("requestGenerate") end)
+  if not m then return end
+  local ok = pcall(function()
+    sdk.hook(m, function(args)
+      local R = SUMMON.ride
+      if not R or (R.pending or 0) <= 0 then return end
+      local cont = try(function() return sdk.to_managed_object(args[3]) end)
+      if not cont then return end
+      local ci = try(function() return cont:call("get_CommonInfo") end)
+      local cat = ci and try(function() return ci:get_field("_Category") end)
+      if cat ~= 3 then return end
+      R.pending = R.pending - 1
+      if R.init then pcall(function() ci:call("setInitSetType", R.init) end) end
+      pcall(function() ci:call("setCharaID", R.chara) end)
+      local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+      local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+      local gpos = player and try(function() return player:call("get_LastGroundPosition") end)
+      local prc = player and try(function() return player:get_field("<PosRotContext>k__BackingField") end)
+      local rot = prc and try(function() return prc:call("get_Rot") end)
+      if gpos then pcall(function() ci:call("setContextPosition", gpos) end) end
+      if rot then pcall(function() ci:call("setContextAngle", rot) end) end
+      if gpos then pcall(function() ci:call("setInitialPosition", gpos) end) end
+      local gm = try(function() return sdk.get_managed_singleton("app.GenerateManager") end)
+      local cc = gm and try(function() return gm:call("get_CatalogCtrl") end)
+      pcall(function() gm:call("requestStandbyPrefab", cont) end)
+      if ci then pcall(function() cc:call("requestStandbyPrefab", ci) end) end
+      SUMMON.converted = (SUMMON.converted or 0) + 1
+      SL("converted a spawn into " .. tostring(R.dispname) .. " at your feet")
+    end, function(retval)
+      return retval
+    end)
+  end)
+  SUMMON.rideHook = ok
+end
+
+COMMANDS.summon_boss = function(a)
+  local name = (a and a[1]) or ""
+  summon_log = {}
+  SL("== summon_boss " .. name .. " (bridge 1.89.74) ==")
+  if not name:match("^ch%d+[%w_]*$") then
+    SL("rejected: not a character catalog name")
+    error("'" .. name .. "' is not a character catalog name (e.g. ch250000)")
+  end
+  -- The pipeline keys on the _00 VARIANT code (probe step 11).
+  local dispname = name
+  local chara = enum_value("app.CharacterID", name .. "_00")
+  if chara ~= nil then
+    dispname = name .. "_00"
+  else
+    chara = enum_value("app.CharacterID", name)
+  end
+  if chara == nil then SL("catalog lookup failed") error("unknown character id: " .. name) end
+  SL("character resolved: " .. dispname .. " = " .. tostring(chara))
+  -- Init resolution: the bare family base ("Ch250") first; else
+  -- the first family member that is not a scenario/quest init;
+  -- else Common(1). The value goes in as a plain number (probe 48).
+  local fam = name:sub(3, 5)
+  local initVal, initName, fallback, fallbackPose = nil, nil, nil, nil
+  local itd = try(function() return sdk.find_type_definition("app.GenerateDefine.InitSetTypeEnum") end)
+  for _, f in ipairs(itd and try(function() return itd:get_fields() end) or {}) do
+    if try(function() return f:is_static() end) then
+      local fn = try(function() return f:get_name() end)
+      local d = try(function() return f:get_data(nil) end)
+      local dv = d and tonumber(tostring(d))
+      if fn == "Ch" .. fam and dv ~= nil then
+        initVal, initName = dv, fn
+      elseif fn and fn:sub(1, 2 + #fam) == "Ch" .. fam and dv ~= nil and
+         not fn:find("Summon") and not fn:find("Event") and
+         not fn:find("Quest") then
+        -- Pose setups (Sit/Sleep/Wait/...) make a boss that
+        -- just sits there (ch261000 picked Ch261000_Sit live);
+        -- they are last-resort fallbacks only (v1.89.64).
+        if fn:find("Sit") or fn:find("Sleep") or fn:find("Wait") or
+           fn:find("Stagnation") or fn:find("Confined") or fn:find("Stay") then
+          if not fallbackPose then fallbackPose = { val = dv, name = fn } end
+        elseif not fallback then
+          fallback = { val = dv, name = fn }
+        end
+      end
+    end
+  end
+  if not initVal and fallback then initVal, initName = fallback.val, fallback.name end
+  if not initVal and fallbackPose then initVal, initName = fallbackPose.val, fallbackPose.name end
+  if not initVal then initVal, initName = 1, "Common" end
+  SL("init set: " .. initName .. " = " .. tostring(initVal))
+  local prev = SUMMON.ride and SUMMON.ride.pending or 0
+  SUMMON.ride = { pending = prev + 1, chara = chara, dispname = dispname, init = initVal }
+  SUMMON.name, SUMMON.chara = dispname, chara
+  summon_ride_install()
+  if not SUMMON.rideHook then
+    SL("ride hook FAILED to install")
+    error("could not install the generate hook - see summon_log.txt")
+  end
+  SL("armed: " .. dispname .. " - pending conversions: " .. SUMMON.ride.pending)
+  return "summon armed: the next enemy spawn becomes " .. dispname ..
+    " at your feet - walk toward any enemy group"
+end
+
+COMMANDS.summon_verify = function()
+  if not SUMMON.name then return "no summon yet this session" end
+  local R = SUMMON.ride
+  local hookState = SUMMON.rideHook and "installed" or "NOT INSTALLED"
+  if R and (R.pending or 0) > 0 then
+    return "verify " .. tostring(SUMMON.name) ..
+      ": armed pending=" .. tostring(R.pending) ..
+      " hook=" .. hookState ..
+      " converted=" .. tostring(SUMMON.converted or 0) ..
+      " - walk toward an enemy group to trigger the conversion"
+  end
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local inst = pm and SUMMON.chara and try(function()
+    return pm:call("getInstanceChara", 3, SUMMON.chara)
+  end)
+  local msg = "verify " .. tostring(SUMMON.name) .. ": instance=" ..
+    (inst and "FOUND" or "not found") ..
+    " hook=" .. hookState ..
+    " converted=" .. tostring(SUMMON.converted or 0)
+  SL(msg)
+  return msg
+end
+
+
+do
+---------------------------------------------------------------- v1.89.71: kill nearby enemies v7
+-- v6 REGRESSED: its handle-type check discarded every resolved
+-- handle (see sk_handle_for) and v6 killed nothing that
+-- resolved. v7 removes the check and widens the category
+-- fallback to 0-9. Rogues still resolve under NO category
+-- (0-5 proven nil in v6; 6-9 untested) - they are likely not
+-- PawnManager characters at all, which is a separate probe
+-- if pursued. Despawn fallback kept as last resort, already
+-- known to remove nothing visible.
+-- v5's verdict (user, live): the Grim Ogre and Dragon he saw
+-- killAndSetDieLoop called on DID die (probable - he wasn't
+-- certain), while Chimera/Drake and nearby normal monsters did
+-- not. The mechanism is proven when a handle resolves; the
+-- remaining failure is handle resolution itself. So v6:
+--   * category fallback: after all category-3 variants fail,
+--     try categories 0,1,2,4,5 (Rogues resolve under none in
+--     category 3) - a handle only counts when its own type
+--     matches the element's type;
+--   * HP filter tightened to word-boundary HP (v5's substring
+--     "hp" matched FixedPushPosition and handler objects).
+-- Chimera/Drake failures are still undiagnosed from a log (no
+-- v5 log with them in range arrived): if their handles WERE
+-- found but the death call failed, that is a different fix
+-- and the v6 log will show it.
+-- v4 failed live (user's summon_kill.txt, 13 enemies): chara=nil
+-- for EVERY element, so the ladder never reached a character, a
+-- Hit, or an HP field - and its "damage-call ok" lines were false
+-- positives (a getter and an event handler, not kills).
+-- Probe 52 then proved, read-only, what actually works:
+--   * GenerateInfo EXISTS on every element, but get_CommonInfo()
+--     returns nil for all of them - the int route (probe 46's
+--     chain) is dead for live _EnemyList elements. Never use it
+--     again for killing.
+--   * The NAME route works: type app.Ch261000 -> CharacterID
+--     enum field ch261000_00 (or a same-family variant), and
+--     PawnManager.getInstanceChara(3, enum) returns the live
+--     character with real IsBoss, real <DistanceXZSqFromPlayer>,
+--     and a Hit object. Proven for Ch223003, Ch254000,
+--     Ch254001, Ch222005. Ch253010 and Ch230000 returned no
+--     handle for the first same-family variant tried - so v5
+--     tries EVERY same-family variant, not just the first.
+--   * Hit has NO current-HP field (full field list dumped).
+--     HP must live on the character itself or its status
+--     controller - so the HP hunt searches the handle, the
+--     Hit, and Hit.<CachedStatusConditionCtrl>, by name only
+--     (hp/health, never max/rate/damage/recover), writes 0
+--     with read-back, and reports - it never claims a kill
+--     the game hasn't shown.
+--   * Damage-named method calls are BANNED (v4's false
+--     positives). Only dead/kill/die-named methods on the
+--     handle are tried, with no args, inside pcall, and
+--     get/is/on-prefixed names are skipped (getters/handlers).
+--   * RESULT honesty: the run ends with a re-scan of
+--     _EnemyList, and the response says "kill attempt", never
+--     "killed" - the user's eyes confirm death.
+local sk_hist = {}
+local function SK(x)
+  sk_hist[#sk_hist + 1] = x
+  wr(DIR .. "summon_kill.txt", table.concat(sk_hist, "\n"))
+end
+
+local function sk_char_id_fields()
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  return ctd and try(function() return ctd:get_fields() end) or {}
+end
+
+-- All CharacterID enum values for one base code ("ch254000"):
+-- the _00 variant first, then every other same-family member in
+-- catalog order. Returns a list of {value, name}.
+local function sk_enums_for(cfields, base)
+  local out, rest = {}, {}
+  for _, f in ipairs(cfields) do
+    if try(function() return f:is_static() end) then
+      local nm = try(function() return f:get_name() end)
+      if nm then
+        if nm == base .. "_00" then
+          out[#out + 1] = { try(function() return f:get_data(nil) end), nm }
+        elseif nm:sub(1, #base + 1) == base .. "_" then
+          rest[#rest + 1] = { try(function() return f:get_data(nil) end), nm }
+        end
+      end
+    end
+  end
+  for _, r in ipairs(rest) do out[#out + 1] = r end
+  return out
+end
+
+-- v7: v6's handle-type check was a REGRESSION and is removed.
+-- get_type_definition() on a PawnManager handle returns the
+-- STATIC type app.Character, not the runtime class - so v6
+-- threw away every real handle (Boltscale via ch221004_60,
+-- Gore Chimera via ch254001_00, wolves via ch223003_00, harpy
+-- via ch222005_00) and killed nothing that resolved, while
+-- probe52 in the same moment showed those handles live, the
+-- Chimera a boss at distSq 310. Lesson: NEVER gate on
+-- get_type_definition for PawnManager handles. The enum IS
+-- the identity (a pawn cannot be a Boltscale), and v5 proved
+-- resolved handles are the right targets (ogre/dragon died).
+-- v7 = v5 acceptance (first non-nil handle wins) + the
+-- category fallback widened to 0-9 (Rogues returned nil in
+-- every category 0-5 in v6; 6-9 is a cheap getter sweep).
+local function sk_handle_for(pm, cfields, base)
+  for _, cat in ipairs({ 3, 0, 1, 2, 4, 5, 6, 7, 8, 9 }) do
+    for _, e in ipairs(sk_enums_for(cfields, base)) do
+      local ch = e[1] and try(function() return pm:call("getInstanceChara", cat, e[1]) end)
+      if ch then return ch, e[2], cat end
+    end
+  end
+  return nil
+end
+
+-- HP hunt across the given objects ({obj, where} pairs). Only
+-- name-identified current-HP fields; writes 0 with read-back.
+-- Returns the winning description or nil.
+local function sk_hp_hunt(objs)
+  for _, entry in ipairs(objs) do
+    local o, where = entry.obj, entry.where
+    if o then
+      local td = try(function() return o:get_type_definition() end)
+      for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+        local fn = try(function() return f:get_name() end)
+        if fn then
+          -- v6: HP as a WORD, not a substring. v5's substring "hp"
+          -- matched FixedPushPosition ("pusHPosition"), a boss-HP
+          -- -gauge bool and an HP handler object - all saved only
+          -- by the number check. The log stays honest now.
+          local low = fn:lower()
+          local isHp = low == "hp" or low:find("^hp") or low:find("hp$") or
+            low:find("_hp_") or low:find("health") or low:find("hitpoint")
+          local excluded = low:find("max") or low:find("rate") or
+            low:find("damage") or low:find("recover") or low:find("guard")
+          if isHp and not excluded then
+            local v = try(function() return o:get_field(fn) end)
+            SK("    HP candidate (" .. where .. "): " .. fn .. " = " .. tostring(v))
+            if type(v) == "number" and v > 0 then
+              local okS = pcall(function() o:set_field(fn, 0) end)
+              local back = try(function() return o:get_field(fn) end)
+              SK("    HP write (" .. where .. "): " .. fn .. " -> 0 (ok=" ..
+                 tostring(okS) .. ", reads back " .. tostring(back) .. ")")
+              if okS then return "hp-write " .. fn .. " (" .. where .. ")" end
+            end
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- v8 (probe53 answered, 2026-10-24): probe53 on a live boss
+-- (ch257003, ReducedMaxHp 240000) proved three things.
+-- 1. killAndSetDieLoop is a CONFIRMED no-op on a healthy
+-- enemy: IsStartDead stayed false, and the <systemStatus> and
+-- <TempStatusFlag> object pointers were IDENTICAL before and
+-- after the call. The v7 "ok=true" line means only "didn't
+-- throw". Never again treat it as a kill by itself.
+-- 2. HP is NOT a field anywhere (character / Hit / status
+-- controller field dumps contain no Hp value) - which is why
+-- the v5/v6/v7 name hunt found nothing writable. HP lives
+-- behind Hit METHODS, dumped by probe53 with signatures:
+-- get_Hp() -> Single, get_OldHp(), get_OriginalMaxHp(),
+-- get_ReducedMaxHp(), get_IsDie() -> Boolean, and the
+-- setters setHpValue(Single, Boolean) and
+-- setHp(Single, Boolean, Int32). v8 therefore reads Hp by
+-- method, tries each setter in turn with a get_Hp read-back
+-- after every attempt, and only when Hp reads 0 does it call
+-- killAndSetDieLoop (a die-loop may finally engage once HP
+-- is actually 0, where it did nothing at full HP) - then it
+-- re-reads get_IsDie / IsStartDead / IsKilledByMethod so the
+-- log shows whether the enemy entered a dying state.
+-- 3. Damage-entry methods (damageProc / updateDamageHp /
+-- updateDamage) all take a DamageInfo object that cannot be
+-- fabricated safely from Lua - they stay BANNED, like all
+-- damage-named calls since v4's false positives. The HP
+-- setters need no DamageInfo, which is why they are tried.
+-- The old field hunt + death-call + despawn ladder is kept
+-- BELOW the HP ladder as fallback only, and runs only when
+-- no HP setter moved Hp to 0.
+-- v9 (kill v8 failed live, 2026-10-24): on the summoned Evil
+-- Eye (get_Hp 650000, origMax = reducedMax = 650000) ALL FOUR
+-- v8 setters returned ok=true and get_Hp read back 650000
+-- unchanged, twice (the eye appears twice in _EnemyList, same
+-- distSq - one character, two list elements, as with wolves
+-- before). ok=true is again only "didn't throw": the setters
+-- are silently ignored from outside, so Hp is either computed
+-- (from region HPs or from ReducedMaxHp) or needs a damage
+-- context. v9 therefore tries, in order, each with a read-back:
+-- region HPs (BossHpGaugeNum + getRegionHp / OriginalMax /
+-- ReducedMax / isRegionDie, then setRegionOriginalMaxHp(0)
+-- per region), setReducedMaxHp(0), recoverHp(-Hp) as a
+-- damage-path attempt, and finally the death-state flag
+-- itself - Hit.set_IsStartDead(true), which probe53 listed -
+-- plus character IsKilledByMethod=true, then one more
+-- killAndSetDieLoop, now possibly in a dying context.
+-- Success is judged ONLY by a read-back: Hp 0, IsDie true,
+-- or IsStartDead true. The v8 setters + field hunt + old
+-- death-call + despawn ladder stay as fallback below.
+-- v10 (v9 verdict OVERTURNED by the user, twice, 2026-10-24):
+-- region-zero DID set Hp 0 + IsDie true on the Evil Eye, and
+-- the eye STILL stood in front of him, alive, in the next two
+-- runs (already Hp 0 / IsDie true at press time, distances
+-- 667 then 1504 - it is moving away, or he is). So IsDie is
+-- NOT the character-death flag: it reads like a gauge/region
+-- death (region 0 dead, regions 1-9 untouched: 500000, 37500s,
+-- 15000s), and the guides' "retreats after its first health
+-- section" fits region 0 being one section, not the whole
+-- boss. v10 therefore: zero EVERY region (not just region 0),
+-- and - the v9 structural bug - ALWAYS run set_IsStartDead
+-- and IsKilledByMethod after the region work (v9 skipped them
+-- whenever region-zero succeeded, so they were never tried on
+-- a Hp-0 enemy at all), then die-loop, with a final state
+-- dump. It also logs element/handle pointers per element
+-- (are the 2-4 eye list entries one actor or several?) and
+-- character <IsImmortality> for in-range targets. Visible
+-- death, not any flag, is the only success criterion now.
+-- v11 (user verdict, 2026-10-24): "the 2 summons got killed
+-- normally the 3rd one does not get kiled by the kill
+-- botton." The v10 log names the prime suspect for the
+-- 3rd: ch258002's character <IsImmortality> = true, while
+-- the wolf in the same run reads false and every Hit gate
+-- reads false on both. Immortality is a CHARACTER flag, not
+-- a Hit gate, so no earlier ladder ever touched it - and
+-- character set_field DOES stick (v10 proved it: the
+-- IsKilledByMethod=true set on the first ch258002 element
+-- still read true on the second and third elements, same
+-- handle). v11 therefore clears IsImmortality first, with a
+-- read-back, and re-checks it in the final state. It also
+-- logs the pointer proof from v10: many _EnemyList elements
+-- share ONE PawnManager handle per species (all ch231000
+-- elements -> one handle, all ch258002 elements -> one
+-- handle), so element count is not actor count, and the
+-- handle is the per-species registered instance. Also
+-- noted from v10: setReducedMaxHp(0) reads back 1.0, not 0
+-- (clamped by MinRatioReducedMaxHp=1.0 from probe53), and a
+-- new far species appeared: ch299400_A_10 (IsBoss=false) -
+-- recorded, not named, not in the roster.
+-- v12 (v11 failed, user verdict "kill did not work",
+-- 2026-10-24): immortality is OUT as the persistent cause -
+-- ch258002 read IsImmortality=false this run (it was true
+-- in v10, so the flag is transient), and the kill still did
+-- not work. The deeper problem is now the target itself:
+-- every handle so far was already dead at press time, yet
+-- a live actor stood metres away. The PawnManager handle is
+-- one registered instance per species (v10 pointers proved
+-- it), and it may be stale, not the live actor. v12
+-- therefore tries the kill on the _EnemyList ELEMENT itself
+-- first - a ChXXXXXX object with its own pointer, its own
+-- Hit if it has one, its own gates/regions/death flag -
+-- with read-backs, and only then runs the handle ladder as
+-- before. If the element's Hp moves but the handle's does
+-- not (or vice versa), the log proves they are distinct
+-- objects. An element kill is claimed ONLY when its Hp was
+-- > 0 before and reads 0 / IsDie flips after - IsDie-true
+-- on an already-dead object claims nothing (v9 lesson).
+-- This also finally tries Rogues on their own elements,
+-- since they never resolve a handle at all.
+-- v13 (v12 verdict, 2026-10-24): "that killed the boss
+-- but the other summon talos did not die and when the
+-- boss got killed i did not gain exp from that." Two
+-- separate findings. (1) FIRST VISIBLE KILL: the element
+-- ladder killed a boss (ch258002, the long-standing
+-- holdout) - operating on the element, not the handle, was
+-- the right move. (2) Talos (ch259000) held out under the
+-- identical stack, and its element is the ONLY one in the
+-- log carrying <EnableDead>k__BackingField = false plus
+-- <IsDeadPointA/B>k__BackingField = false - death-gating
+-- fields no other element type logged. v13 sets EnableDead
+-- true (read-back) before the element die-loop, and logs
+-- the DeadPoint fields before/after WITHOUT setting them
+-- (their semantics - weak points? death stages? - are not
+-- yet known, so they stay read-only this round). (3) EXP:
+-- a flag kill bypasses the game's damage/kill-credit
+-- pipeline entirely - no attacker is credited, so no EXP
+-- is expected from the kill button as built. EXP would
+-- need a kill credited through damage (a DamageInfo with
+-- the player as attacker), which probe53 already showed
+-- cannot be fabricated safely from Lua. That is a separate
+-- piece of work, not another flag rung.
+-- v14 (v13 verdict "it does not kill talos", 2026-10-24):
+-- EnableDead alone is NOT sufficient. Talos's element went
+-- 25000 -> 0, IsDie flipped, EnableDead held true, and it
+-- still stands. The only Talos-specific difference left in
+-- the log is IsDeadPointA/B, still false. v14 sets both
+-- true (read-backs) before the die-loop, on elements that
+-- HAVE those fields (nil on every other type, so the rung
+-- skips cleanly elsewhere). Their exact semantics are
+-- still a hypothesis - weak-point/destruction markers or
+-- death-stage flags - but they are the last unexplained
+-- Talos difference, and setting a named bool on the
+-- element with a read-back is the same class as the
+-- EnableDead rung that already ran safely. If Talos still
+-- stands after this, its death is scripted (not flag
+-- driven) and the remaining route is the damage pipeline.
+-- CORRECTION to the v12/v13 notes: element Hit is NOT the
+-- handle's Hit. The v13 log proves it: ch220001 elements
+-- [27][28] read 15000 on the element while the handle
+-- reads 0, and Talos's element read 25000 while its handle
+-- read 0. Element and handle carry separate Hit state;
+-- the element's is the live one.
+COMMANDS.summon_kill = function()
+  sk_hist = {}
+  SK("== summon_kill v14 (bridge 1.89.82) ==")
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  SK("  _EnemyList count=" .. tostring(n))
+  if not (pm and list and n) then error("enemy list unavailable - load into the world first") end
+  local cfields = sk_char_id_fields()
+  local done, skipped = {}, 0
+  for i = 0, math.min(n, 40) - 1 do
+    local el = try(function() return list:call("get_Item", i) end)
+    if el then
+      local etd = try(function() return el:get_type_definition() end)
+      local tn = etd and try(function() return etd:get_full_name() end) or "?"
+      local base = tn:match("app%.(Ch%d+)")
+      if base then base = base:lower() end
+      local gi = try(function() return el:get_field("<GenerateInfo>k__BackingField") end)
+        or try(function() return el:call("get_GenerateInfo") end)
+      -- NOTE: do NOT write this as `base and sk_handle_for(...) or
+      -- nil`: Lua truncates a call inside and/or to one value, so
+      -- the winning enum NAME would be lost (probe 52's log showed
+      -- "-> nil" for exactly this reason - the value was right,
+      -- the name was dropped by the same construct).
+      local ch, won, wcat = nil, nil, nil
+      if base then ch, won, wcat = sk_handle_for(pm, cfields, base) end
+      local isBoss, distSq = nil, nil
+      if ch then
+        isBoss = try(function() return ch:get_field("<IsBoss>k__BackingField") end)
+        distSq = try(function() return ch:get_field("<DistanceXZSqFromPlayer>k__BackingField") end)
+      end
+      local near = (type(distSq) ~= "number") or distSq <= 2500
+      SK("  [" .. i .. "] " .. tn .. " handle=" .. tostring(ch ~= nil) ..
+         (won and (" via " .. won .. " cat=" .. tostring(wcat)) or "") ..
+         " IsBoss=" .. tostring(isBoss) ..
+         " distSqFromPlayer=" .. tostring(distSq) ..
+         " near=" .. tostring(near) ..
+         " el=" .. tostring(el) .. " ch=" .. tostring(ch))
+      if not near then
+        skipped = skipped + 1
+      else
+        local applied = nil
+        local hit = ch and try(function() return ch:get_field("<Hit>k__BackingField") end)
+        -- v12 ELEMENT ladder: try the kill on the list
+        -- element itself before touching the handle.
+        local elApplied = nil
+        if el then
+          local elHit = try(function() return el:get_field("<Hit>k__BackingField") end)
+          if not elHit then elHit = try(function() return el:call("get_Hit") end) end
+          local elBoss = try(function() return el:get_field("<IsBoss>k__BackingField") end)
+          local elDist = try(function() return el:get_field("<DistanceXZSqFromPlayer>k__BackingField") end)
+          local elImm = try(function() return el:get_field("<IsImmortality>k__BackingField") end)
+          SK("    v12 element: Hit=" .. tostring(elHit ~= nil) ..
+             " IsBoss=" .. tostring(elBoss) .. " distSq=" .. tostring(elDist) ..
+             " IsImmortality=" .. tostring(elImm))
+          local etd2 = try(function() return el:get_type_definition() end)
+          for _, f in ipairs(etd2 and try(function() return etd2:get_fields() end) or {}) do
+            local fn = try(function() return f:get_name() end)
+            if fn then
+              local low = fn:lower()
+              if low:find("hit") or low:find("hp") or low:find("die") or low:find("dead") or low:find("immort") or low:find("boss") or low:find("distance") then
+                SK("    v12 element field " .. fn .. " = " ..
+                   tostring(try(function() return el:get_field(fn) end)))
+              end
+            end
+          end
+          if elImm == true then
+            local okI = pcall(function() el:set_field("<IsImmortality>k__BackingField", false) end)
+            SK("    v12 element IsImmortality cleared: ok=" .. tostring(okI) ..
+               ", reads back " .. tostring(try(function() return el:get_field("<IsImmortality>k__BackingField") end)))
+          end
+          -- v13: Talos's death gate. Only its element type
+          -- logs EnableDead, and it reads false while Talos
+          -- survives the full stack. Set it true (read-back)
+          -- before the die-loop runs. DeadPointA/B are logged
+          -- only - their meaning is not established yet.
+          local elDeadA = try(function() return el:get_field("<IsDeadPointA>k__BackingField") end)
+          local elDeadB = try(function() return el:get_field("<IsDeadPointB>k__BackingField") end)
+          local elEnDead = try(function() return el:get_field("<EnableDead>k__BackingField") end)
+          SK("    v13 element death gate: EnableDead=" .. tostring(elEnDead) ..
+             " IsDeadPointA=" .. tostring(elDeadA) .. " IsDeadPointB=" .. tostring(elDeadB))
+          if elEnDead == false then
+            local okE = pcall(function() el:set_field("<EnableDead>k__BackingField", true) end)
+            SK("    v13 element EnableDead set true: ok=" .. tostring(okE) ..
+               ", reads back " .. tostring(try(function() return el:get_field("<EnableDead>k__BackingField") end)))
+          end
+          -- v14: Talos's last unexplained difference. Only
+          -- its element type has these fields; nil elsewhere
+          -- means the rung skips cleanly on other species.
+          if elDeadA == false then
+            local okA = pcall(function() el:set_field("<IsDeadPointA>k__BackingField", true) end)
+            SK("    v14 element IsDeadPointA set true: ok=" .. tostring(okA) ..
+               ", reads back " .. tostring(try(function() return el:get_field("<IsDeadPointA>k__BackingField") end)))
+          end
+          if elDeadB == false then
+            local okB = pcall(function() el:set_field("<IsDeadPointB>k__BackingField", true) end)
+            SK("    v14 element IsDeadPointB set true: ok=" .. tostring(okB) ..
+               ", reads back " .. tostring(try(function() return el:get_field("<IsDeadPointB>k__BackingField") end)))
+          end
+          if elHit then
+            for _, fn in ipairs({ "<IsInvincible>k__BackingField",
+                                  "<IsDamageZero>k__BackingField",
+                                  "<IsNoDie>k__BackingField" }) do
+              local v = try(function() return elHit:get_field(fn) end)
+              SK("    v12 element gate " .. fn .. " = " .. tostring(v))
+              if v == true then
+                local okS = pcall(function() elHit:set_field(fn, false) end)
+                SK("    v12 element gate cleared: " .. fn .. " (ok=" .. tostring(okS) .. ")")
+              end
+            end
+            local function elHpRead()
+              return try(function() return elHit:call("get_Hp") end)
+            end
+            local elHp = elHpRead()
+            local elGauge = try(function() return elHit:call("get_BossHpGaugeNum") end)
+            local elDie = try(function() return elHit:call("get_IsDie") end)
+            SK("    v12 element HP: get_Hp=" .. tostring(elHp) ..
+               " gauge=" .. tostring(elGauge) .. " IsDie=" .. tostring(elDie))
+            local elNreg = 1
+            if type(elGauge) == "number" and elGauge > 0 and elGauge <= 16 then
+              elNreg = math.floor(elGauge)
+            end
+            for ri = 0, elNreg - 1 do
+              local rh = try(function() return elHit:call("getRegionHp", ri) end)
+              SK("    v12 element region " .. ri .. " before: Hp=" .. tostring(rh))
+              local okR = pcall(function() elHit:call("setRegionOriginalMaxHp", 0, ri, false) end)
+              local rh2 = try(function() return elHit:call("getRegionHp", ri) end)
+              SK("    v12 element region-zero " .. ri .. ": ok=" .. tostring(okR) ..
+                 ", regionHp=" .. tostring(rh2) .. ", get_Hp=" .. tostring(elHpRead()))
+            end
+            local okS = pcall(function() elHit:call("set_IsStartDead", true) end)
+            local elSD = try(function() return elHit:get_field("<IsStartDead>k__BackingField") end)
+            local elDie2 = try(function() return elHit:call("get_IsDie") end)
+            local elHp2 = elHpRead()
+            SK("    v12 element after IsStartDead(true) ok=" .. tostring(okS) ..
+               ": IsStartDead=" .. tostring(elSD) .. " IsDie=" .. tostring(elDie2) ..
+               " get_Hp=" .. tostring(elHp2))
+            local okD = pcall(function() el:call("killAndSetDieLoop") end)
+            local elSD2 = try(function() return elHit:get_field("<IsStartDead>k__BackingField") end)
+            local elDie3 = try(function() return elHit:call("get_IsDie") end)
+            local elHp3 = elHpRead()
+            SK("    v12 element after die-loop ok=" .. tostring(okD) ..
+               ": IsStartDead=" .. tostring(elSD2) .. " IsDie=" .. tostring(elDie3) ..
+               " get_Hp=" .. tostring(elHp3))
+            SK("    v13 element death gate after: EnableDead=" ..
+               tostring(try(function() return el:get_field("<EnableDead>k__BackingField") end)) ..
+               " IsDeadPointA=" .. tostring(try(function() return el:get_field("<IsDeadPointA>k__BackingField") end)) ..
+               " IsDeadPointB=" .. tostring(try(function() return el:get_field("<IsDeadPointB>k__BackingField") end)))
+            if type(elHp) == "number" and elHp > 0 and
+               (elDie3 == true or (type(elHp3) == "number" and elHp3 <= 0)) then
+              elApplied = "v12 element kill (confirm visually)"
+            end
+          end
+        end
+        if hit then
+          for _, fn in ipairs({ "<IsInvincible>k__BackingField",
+                                "<IsDamageZero>k__BackingField",
+                                "<IsNoDie>k__BackingField" }) do
+            local v = try(function() return hit:get_field(fn) end)
+            SK("    gate " .. fn .. " = " .. tostring(v))
+            if v == true then
+              local okS = pcall(function() hit:set_field(fn, false) end)
+              SK("    gate cleared: " .. fn .. " -> false (ok=" .. tostring(okS) .. ")")
+            end
+          end
+        end
+        if ch then
+          SK("    char IsImmortality=" ..
+             tostring(try(function() return ch:get_field("<IsImmortality>k__BackingField") end)) ..
+             " IsKilledByMethod=" ..
+             tostring(try(function() return ch:get_field("IsKilledByMethod") end)))
+          -- v11: clear character immortality first, with a
+          -- read-back. Hit gates were already false on the
+          -- unkilled boss; this flag was the only true gate.
+          local imm = try(function() return ch:get_field("<IsImmortality>k__BackingField") end)
+          if imm == true then
+            local okI = pcall(function() ch:set_field("<IsImmortality>k__BackingField", false) end)
+            local imm2 = try(function() return ch:get_field("<IsImmortality>k__BackingField") end)
+            SK("    v11 IsImmortality cleared: ok=" .. tostring(okI) ..
+               ", reads back " .. tostring(imm2))
+          end
+        end
+        -- v8 HP-method ladder (probe53): read Hp by method,
+        -- try each setter with a read-back, die-loop only at 0.
+        local hpMethodApplied = nil
+        if ch and hit then
+          local function hpRead()
+            return try(function() return hit:call("get_Hp") end)
+          end
+          local hpBefore = hpRead()
+          local origMax = try(function() return hit:call("get_OriginalMaxHp") end)
+          local redMax = try(function() return hit:call("get_ReducedMaxHp") end)
+          local dieBefore = try(function() return hit:call("get_IsDie") end)
+          SK("    HP methods: get_Hp=" .. tostring(hpBefore) ..
+             " origMax=" .. tostring(origMax) ..
+             " reducedMax=" .. tostring(redMax) ..
+             " IsDie=" .. tostring(dieBefore))
+          if type(hpBefore) == "number" and hpBefore > 0 then
+            local attempts = {
+              { "setHpValue(0, false)", function() hit:call("setHpValue", 0, false) end },
+              { "setHpValue(0, true)", function() hit:call("setHpValue", 0, true) end },
+              { "setHp(0, false, 0)", function() hit:call("setHp", 0, false, 0) end },
+              { "setHp(0, true, 0)", function() hit:call("setHp", 0, true, 0) end },
+            }
+            for _, a in ipairs(attempts) do
+              local okC = pcall(a[2])
+              local back = hpRead()
+              SK("    HP attempt " .. a[1] .. ": ok=" .. tostring(okC) ..
+                 ", get_Hp reads back " .. tostring(back))
+              if okC and type(back) == "number" and back <= 0 then
+                hpMethodApplied = "hp-method " .. a[1]
+                break
+              end
+            end
+            if hpMethodApplied then
+              local dieAfterHp = try(function() return hit:call("get_IsDie") end)
+              local killedBy = try(function() return ch:get_field("IsKilledByMethod") end)
+              local startDead = try(function() return hit:get_field("<IsStartDead>k__BackingField") end)
+              SK("    after HP 0: IsDie=" .. tostring(dieAfterHp) ..
+                 " IsKilledByMethod=" .. tostring(killedBy) ..
+                 " IsStartDead=" .. tostring(startDead))
+              local okD = pcall(function() ch:call("killAndSetDieLoop") end)
+              local dieAfterDie = try(function() return hit:call("get_IsDie") end)
+              local startDead2 = try(function() return hit:get_field("<IsStartDead>k__BackingField") end)
+              local killedBy2 = try(function() return ch:get_field("IsKilledByMethod") end)
+              local hpAfterDie = hpRead()
+              SK("    die-loop after HP 0: ok=" .. tostring(okD) ..
+                 ", IsDie=" .. tostring(dieAfterDie) ..
+                 " IsStartDead=" .. tostring(startDead2) ..
+                 " IsKilledByMethod=" .. tostring(killedBy2) ..
+                 " get_Hp=" .. tostring(hpAfterDie))
+            end
+          elseif hpBefore == 0 then
+            SK("    HP already 0 - skipping setters")
+          end
+        end
+        -- v9 ladder (see the v9 comment above the command):
+        -- region HPs, reduced-max, damage-path, death flag.
+        local v9Applied = nil
+        if ch and hit and not hpMethodApplied then
+          local function hpRead9()
+            return try(function() return hit:call("get_Hp") end)
+          end
+          local function deadState9(tag)
+            local d = try(function() return hit:call("get_IsDie") end)
+            local s = try(function() return hit:get_field("<IsStartDead>k__BackingField") end)
+            local k = try(function() return ch:get_field("IsKilledByMethod") end)
+            local h = hpRead9()
+            SK("    v10 state " .. tag .. ": IsDie=" .. tostring(d) ..
+               " IsStartDead=" .. tostring(s) ..
+               " IsKilledByMethod=" .. tostring(k) ..
+               " get_Hp=" .. tostring(h))
+            return d, s, h
+          end
+          local gauge = try(function() return hit:call("get_BossHpGaugeNum") end)
+          SK("    v10 regions: BossHpGaugeNum=" .. tostring(gauge))
+          local nreg = 1
+          if type(gauge) == "number" and gauge > 0 and gauge <= 16 then
+            nreg = math.floor(gauge)
+          end
+          for ri = 0, nreg - 1 do
+            local rh = try(function() return hit:call("getRegionHp", ri) end)
+            local ro = try(function() return hit:call("getRegionOriginalMaxHp", ri) end)
+            local rr = try(function() return hit:call("getRegionReducedMaxHp", ri) end)
+            local rd = try(function() return hit:call("isRegionDie", ri) end)
+            SK("    v10 region " .. ri .. ": Hp=" .. tostring(rh) ..
+               " origMax=" .. tostring(ro) .. " reducedMax=" .. tostring(rr) ..
+               " isDie=" .. tostring(rd))
+          end
+          -- v10: zero EVERY region, no early break. Region 0
+          -- alone only killed one section (the eye lived on
+          -- with regions 1-9 intact), so each region's own
+          -- read-back is the evidence now, not total Hp.
+          local regionZeroed = false
+          for ri = 0, nreg - 1 do
+            local okR = pcall(function() hit:call("setRegionOriginalMaxHp", 0, ri, false) end)
+            local rh = try(function() return hit:call("getRegionHp", ri) end)
+            local h = hpRead9()
+            SK("    v10 region-zero " .. ri .. " (false): ok=" .. tostring(okR) ..
+               ", regionHp=" .. tostring(rh) .. ", get_Hp=" .. tostring(h))
+            if type(rh) == "number" and rh <= 0 then regionZeroed = true end
+            local okR2 = pcall(function() hit:call("setRegionOriginalMaxHp", 0, ri, true) end)
+            local rh2 = try(function() return hit:call("getRegionHp", ri) end)
+            local h2 = hpRead9()
+            SK("    v10 region-zero " .. ri .. " (true): ok=" .. tostring(okR2) ..
+               ", regionHp=" .. tostring(rh2) .. ", get_Hp=" .. tostring(h2))
+            if type(rh2) == "number" and rh2 <= 0 then regionZeroed = true end
+          end
+          if not v9Applied then
+            local okM = pcall(function() hit:call("setReducedMaxHp", 0) end)
+            local rm = try(function() return hit:call("get_ReducedMaxHp") end)
+            local h = hpRead9()
+            SK("    v10 setReducedMaxHp(0): ok=" .. tostring(okM) ..
+               ", reducedMax=" .. tostring(rm) .. ", get_Hp=" .. tostring(h))
+            if type(h) == "number" and h <= 0 then
+              v9Applied = "v10 setReducedMaxHp(0)"
+            end
+          end
+          if not v9Applied then
+            local cur = hpRead9()
+            if type(cur) == "number" and cur > 0 then
+              local okV = pcall(function() hit:call("recoverHp", -cur, false, 0, false) end)
+              local h = hpRead9()
+              SK("    v10 recoverHp(-Hp): ok=" .. tostring(okV) .. ", get_Hp=" .. tostring(h))
+              if type(h) == "number" and h <= 0 then
+                v9Applied = "v10 recoverHp(-Hp)"
+              end
+            end
+          end
+          -- v10: ALWAYS run these (v9 skipped them whenever
+          -- region-zero succeeded, so they were never tried
+          -- on a Hp-0 enemy at all). do...end keeps the
+          -- block count identical to the if...end it replaces.
+          do
+            local okS = pcall(function() hit:call("set_IsStartDead", true) end)
+            local d, s, h = deadState9("after set_IsStartDead(true) ok=" .. tostring(okS))
+          end
+          do
+            local okK = pcall(function() ch:set_field("IsKilledByMethod", true) end)
+            local d, s, h = deadState9("after IsKilledByMethod=true ok=" .. tostring(okK))
+          end
+          do
+            local okD = pcall(function() ch:call("killAndSetDieLoop") end)
+            local d, s, h = deadState9("after die-loop ok=" .. tostring(okD))
+            local immF = try(function() return ch:get_field("<IsImmortality>k__BackingField") end)
+            SK("    v11 final IsImmortality=" .. tostring(immF))
+            if regionZeroed then
+              v9Applied = "v11 all-regions zeroed + immortality cleared (confirm visually)"
+            end
+          end
+        end
+        if ch then
+          if hpMethodApplied then
+            applied = hpMethodApplied
+          elseif v9Applied then
+            applied = v9Applied
+          else
+            local sc = hit and try(function() return hit:get_field("<CachedStatusConditionCtrl>k__BackingField") end)
+            applied = sk_hp_hunt({ { obj = ch, where = "character" },
+                                   { obj = hit, where = "hit" },
+                                   { obj = sc, where = "statusCtrl" } })
+          end
+        end
+        -- v12: an element kill outranks a handle label, and
+        -- it is the only route that can fire for Rogues
+        -- (no handle at all, so the block above never runs).
+        if elApplied then applied = elApplied end
+        if not applied and ch then
+          local td = try(function() return ch:get_type_definition() end)
+          local cands = {}
+          for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+            local mn = try(function() return m:get_name() end)
+            if mn then
+              local low = mn:lower()
+              if not low:find("^get") and not low:find("^is") and not low:find("^on") then
+                if low == "kill" or low == "die" or low == "dead" or
+                   low:find("kill") or low:find("requestdead") then
+                  cands[#cands + 1] = mn
+                end
+              end
+            end
+          end
+          SK("    death-method candidates (character): [" .. table.concat(cands, ", ") .. "]")
+          for _, mn in ipairs(cands) do
+            local okC, resC = pcall(function() return ch:call(mn) end)
+            SK("    death call " .. mn .. " (character): ok=" ..
+               tostring(okC) .. " -> " .. tostring(resC))
+            if okC then applied = "death-call " .. mn .. " (character)" break end
+          end
+        end
+        if not applied and gi then
+          local okS = pcall(function() gi:set_field("_IsRequestDelete", true) end)
+          SK("    despawn fallback: GenerateInfo._IsRequestDelete -> true (ok=" ..
+             tostring(okS) .. ")")
+          if okS then applied = "despawn (not a kill - no loot/XP)" end
+        end
+        done[#done + 1] = tn .. (isBoss == true and " [boss]" or "") ..
+          ": " .. (applied or "FAILED - send summon_kill.txt")
+      end
+    end
+  end
+  local list2 = em and try(function() return em:get_field("_EnemyList") end)
+  local n2 = list2 and try(function() return list2:call("get_Count") end)
+  SK("  post-scan _EnemyList count=" .. tostring(n2) ..
+     " (was " .. tostring(n) .. ")")
+  if #done == 0 then
+    if n == 0 then return "no enemies in the enemy list right now - see summon_kill.txt" end
+    return "enemies found but all beyond ~50 m - get closer and press Kill again"
+  end
+  local msg = "kill attempt (" .. #done .. " enemies"
+  if skipped > 0 then msg = msg .. ", " .. skipped .. " beyond range skipped" end
+  return msg .. "): " .. table.concat(done, "; ") ..
+    ". Post-scan count " .. tostring(n2) .. " (was " .. tostring(n) ..
+    ") - confirm in-game what actually died"
+end
+end
+
+do
+do
+---------------------------------------------------------------- v1.89.68: kill diagnosis (probe 52, READ-ONLY)
+-- summon_kill v4 log (13 enemies): chara=nil for EVERY element, yet
+-- GenerateInfo exists (the despawn fallback ran) - so the chain
+-- breaks past gi, OR the SelectedCharacterID conversion fails, OR
+-- the int is not in the CharacterID catalog. And the ladder's
+-- "damage-call ok" results were false positives: get_GuardDamage
+-- is a getter, onDamageHit is an event handler - ok=true only meant
+-- the call didn't throw, not that anything died.
+-- This dumps every step raw per element, plus a NAME-based enum
+-- lookup (type app.Ch261000 -> CharacterID field ch261000_00)
+-- that bypasses the int entirely, plus the element's FULL
+-- unfiltered field list (v4's scan only showed hp/dead/damage
+-- members, so "fields=[]" hid everything else). Writes
+-- summon_killdiag.txt and changes NOTHING in-game.
+local function sp52_run()
+  local hist = {}
+  local function L(x)
+    hist[#hist + 1] = x
+    wr(DIR .. "summon_killdiag.txt", table.concat(hist, "\n"))
+  end
+  L("== summon_probe52 (bridge 1.89.68) == kill diagnosis (read-only)")
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  if not (list and n) then error("enemy list unavailable - load into the world first") end
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfields = ctd and try(function() return ctd:get_fields() end) or {}
+  local function enum_by_name(base)
+    local fallback = nil
+    for _, f in ipairs(cfields) do
+      if try(function() return f:is_static() end) then
+        local nm = try(function() return f:get_name() end)
+        if nm == base .. "_00" then
+          return try(function() return f:get_data(nil) end), nm
+        end
+        if nm and nm:sub(1, #base + 1) == base .. "_" and not fallback then
+          fallback = { try(function() return f:get_data(nil) end), nm }
+        end
+      end
+    end
+    if fallback then return fallback[1], fallback[2] end
+    return nil
+  end
+  for i = 0, math.min(n, 40) - 1 do
+    local el = try(function() return list:call("get_Item", i) end)
+    if el then
+      local etd = try(function() return el:get_type_definition() end)
+      local tn = etd and try(function() return etd:get_full_name() end) or "?"
+      L("  [" .. i .. "] type=" .. tn)
+      local gi = try(function() return el:get_field("<GenerateInfo>k__BackingField") end)
+        or try(function() return el:call("get_GenerateInfo") end)
+      L("    gi=" .. tostring(gi ~= nil))
+      local ci = gi and try(function() return gi:call("get_CommonInfo") end)
+      L("    commonInfo=" .. tostring(ci ~= nil))
+      local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+      L("    objectID=" .. tostring(oid ~= nil))
+      local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+      local w = sel and tonumber(tostring(sel)) or nil
+      L("    selectedCharacterID raw=" .. tostring(sel) .. " type=" .. type(sel) ..
+         " tonumber=" .. tostring(w))
+      if w then
+        local found = nil
+        for _, f in ipairs(cfields) do
+          if try(function() return f:is_static() end) then
+            local d = try(function() return f:get_data(nil) end)
+            if d and tonumber(tostring(d)) == w then
+              found = try(function() return f:get_name() end)
+              break
+            end
+          end
+        end
+        L("    enumByInt(" .. w .. ")=" .. tostring(found))
+      end
+      local base = tn:match("app%.(Ch%d+)")
+      if base then base = base:lower() end
+      -- NOTE: never `base and enum_by_name(base) or nil` - Lua
+      -- truncates a call inside and/or to one value, which is why
+      -- probe 52's log showed "-> nil" for the name while the
+      -- value itself was correct.
+      local en, enm = nil, nil
+      if base then en, enm = enum_by_name(base) end
+      L("    enumByName base=" .. tostring(base) .. " -> " .. tostring(enm) ..
+         " value=" .. tostring(en))
+      local ch = en and try(function() return pm:call("getInstanceChara", 3, en) end)
+      L("    getInstanceChara(3, nameEnum)=" .. tostring(ch ~= nil))
+      if ch then
+        L("      IsBoss=" .. tostring(try(function() return ch:get_field("<IsBoss>k__BackingField") end)) ..
+           " distSq=" .. tostring(try(function() return ch:get_field("<DistanceXZSqFromPlayer>k__BackingField") end)))
+        local hit = try(function() return ch:get_field("<Hit>k__BackingField") end)
+        L("      Hit=" .. tostring(hit ~= nil))
+        if hit then
+          local htd = try(function() return hit:get_type_definition() end)
+          local fns = {}
+          for _, f in ipairs(htd and try(function() return htd:get_fields() end) or {}) do
+            local fn = try(function() return f:get_name() end)
+            if fn then fns[#fns + 1] = fn end
+            if #fns >= 60 then break end
+          end
+          L("      Hit fields=[" .. table.concat(fns, ", ") .. "]")
+        end
+      end
+      local efns = {}
+      for _, f in ipairs(etd and try(function() return etd:get_fields() end) or {}) do
+        local fn = try(function() return f:get_name() end)
+        if fn then efns[#efns + 1] = fn end
+        if #efns >= 60 then break end
+      end
+      L("    element fields=[" .. table.concat(efns, ", ") .. "]")
+      local ehit = try(function() return el:get_field("<Hit>k__BackingField") end)
+      L("    element <Hit>=" .. tostring(ehit ~= nil))
+    end
+  end
+  L("== probe52 done - send summon_killdiag.txt ==")
+  return hist
+end
+
+COMMANDS.summon_probe52 = function()
+  local hist = sp52_run()
+  return "summon_probe52: " .. (hist[#hist] or "done")
+end
+end
+
+do
+---------------------------------------------------------------- v1.89.72: kill probe 53 - where is HP, what does the death call change
+-- v7 verdict (user, certain): killAndSetDieLoop ok=true kills
+-- NOBODY visible. The v5 "probably died" verdict is overturned:
+-- the call is a no-op on a healthy enemy (or sets a state the
+-- AI overrides while HP > 0). So before any more kill designs,
+-- find out, on ONE live boss (first handle-found boss, else
+-- first handle-found enemy):
+--   * character fields WITH values (HP by VALUE, not by name -
+--     the v5/v6/v7 name hunt found nothing writable)
+--   * Hit fields WITH values + status-controller fields/values
+--   * <IsStartDead> / <systemStatus> / <TempStatusFlag> BEFORE
+--     and AFTER one killAndSetDieLoop call (does it change
+--     anything at all?)
+--   * Hit methods WITH signatures (a real damage entry takes
+--     a damage value; v4's were getters/handlers)
+-- Self-contained (own copies of the enum/handle helpers).
+-- The death call is the same one v7 already made on three
+-- bosses with no adverse effect. Writes summon_probe53.txt
+-- and changes nothing else in-game.
+local function p53_enums_for(cfields, base)
+  local out, rest = {}, {}
+  for _, f in ipairs(cfields) do
+    if try(function() return f:is_static() end) then
+      local nm = try(function() return f:get_name() end)
+      if nm then
+        if nm == base .. "_00" then
+          out[#out + 1] = { try(function() return f:get_data(nil) end), nm }
+        elseif nm:sub(1, #base + 1) == base .. "_" then
+          rest[#rest + 1] = { try(function() return f:get_data(nil) end), nm }
+        end
+      end
+    end
+  end
+  for _, r in ipairs(rest) do out[#out + 1] = r end
+  return out
+end
+
+local function p53_handle_for(pm, cfields, base)
+  for _, cat in ipairs({ 3, 0, 1, 2, 4, 5, 6 }) do
+    for _, e in ipairs(p53_enums_for(cfields, base)) do
+      local ch = e[1] and try(function() return pm:call("getInstanceChara", cat, e[1]) end)
+      if ch then return ch, e[2], cat end
+    end
+  end
+  return nil
+end
+
+local function p53_dump_fields(L, title, obj)
+  L("  " .. title)
+  if not obj then L("    (nil)") return end
+  local td = try(function() return obj:get_type_definition() end)
+  local fs = td and try(function() return td:get_fields() end) or {}
+  L("    type=" .. tostring(td and try(function() return td:get_full_name() end)) ..
+    " fields=" .. tostring(#fs))
+  for _, f in ipairs(fs) do
+    local fn = try(function() return f:get_name() end)
+    if fn then
+      local v = try(function() return obj:get_field(fn) end)
+      L("    " .. fn .. " = " .. tostring(v))
+    end
+  end
+end
+
+COMMANDS.summon_probe53 = function()
+  local hist = {}
+  local function L(x)
+    hist[#hist + 1] = x
+    wr(DIR .. "summon_probe53.txt", table.concat(hist, "\n"))
+  end
+  L("== summon_probe53 (bridge 1.89.72) == death-call diagnosis")
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  if not (pm and list and n) then error("enemy list unavailable - load into the world first") end
+  local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+  local cfields = ctd and try(function() return ctd:get_fields() end) or {}
+  local target, targetInfo = nil, nil
+  local first = nil
+  for i = 0, math.min(n, 40) - 1 do
+    local el = try(function() return list:call("get_Item", i) end)
+    if el then
+      local etd = try(function() return el:get_type_definition() end)
+      local tn = etd and try(function() return etd:get_full_name() end) or "?"
+      local base = tn:match("app%.(Ch%d+)")
+      if base then base = base:lower() end
+      local ch, won, wcat = nil, nil, nil
+      if base then ch, won, wcat = p53_handle_for(pm, cfields, base) end
+      if ch then
+        local isBoss = try(function() return ch:get_field("<IsBoss>k__BackingField") end)
+        local distSq = try(function() return ch:get_field("<DistanceXZSqFromPlayer>k__BackingField") end)
+        local info = "[" .. i .. "] " .. tn .. " via " .. tostring(won) ..
+          " cat=" .. tostring(wcat) .. " IsBoss=" .. tostring(isBoss) ..
+          " distSq=" .. tostring(distSq)
+        if not first then first = { ch = ch, info = info } end
+        if isBoss == true then target = { ch = ch, info = info } break end
+      end
+    end
+  end
+  target = target or first
+  if not target then L("  no handle-found enemy - nothing to probe") return "summon_probe53: no target" end
+  local ch = target.ch
+  L("  target: " .. target.info)
+  local hit = try(function() return ch:get_field("<Hit>k__BackingField") end)
+  local sc = hit and try(function() return hit:get_field("<CachedStatusConditionCtrl>k__BackingField") end)
+  p53_dump_fields(L, "character fields+values:", ch)
+  p53_dump_fields(L, "Hit fields+values:", hit)
+  p53_dump_fields(L, "status-controller fields+values:", sc)
+  local function snap(tag)
+    if not hit then L("  snapshot " .. tag .. ": (no Hit)") return end
+    for _, fn in ipairs({ "<IsStartDead>k__BackingField",
+                          "<systemStatus>k__BackingField",
+                          "<TempStatusFlag>k__BackingField" }) do
+      L("  snapshot " .. tag .. " " .. fn .. " = " ..
+        tostring(try(function() return hit:get_field(fn) end)))
+    end
+  end
+  snap("BEFORE")
+  local td = try(function() return ch:get_type_definition() end)
+  local hasDie = false
+  for _, m in ipairs(td and try(function() return td:get_methods() end) or {}) do
+    if try(function() return m:get_name() end) == "killAndSetDieLoop" then hasDie = true break end
+  end
+  L("  killAndSetDieLoop present on character: " .. tostring(hasDie))
+  if hasDie then
+    local okC, resC = pcall(function() return ch:call("killAndSetDieLoop") end)
+    L("  death call killAndSetDieLoop: ok=" .. tostring(okC) .. " -> " .. tostring(resC))
+  end
+  snap("AFTER")
+  L("  Hit methods with signatures:")
+  if hit then
+    local htd = try(function() return hit:get_type_definition() end)
+    for _, m in ipairs(htd and try(function() return htd:get_methods() end) or {}) do
+      local mn = try(function() return m:get_name() end)
+      if mn then
+        local pts = try(function() return m:get_param_types() end) or {}
+        local ps = {}
+        for _, t in ipairs(pts) do
+          ps[#ps + 1] = try(function() return t:get_full_name() end) or "?"
+        end
+        local rt = try(function() return m:get_return_type() end)
+        L("    " .. mn .. "(" .. table.concat(ps, ", ") .. ") -> " ..
+          tostring(rt and try(function() return rt:get_full_name() end) or "?"))
+      end
+    end
+  end
+  L("== probe53 done - send summon_probe53.txt ==")
+  return "summon_probe53: " .. (hist[#hist] or "done")
+end
+
+---------------------------------------------------------------- v1.89.79: EXP-credit diagnosis (probe 54)
+-- User: "I want to be credited xp." A flag kill bypasses
+-- damage/kill-credit, so no EXP. Before ANY DamageInfo
+-- work, map the pipeline READ-ONLY: killer/attacker/exp
+-- fields on a live target + its Hit, damage-method
+-- signatures (which name the DamageInfo type), that
+-- type's fields, whether a detached instance can even be
+-- created from Lua, player EXP storage, and - via an
+-- observation-only hook on damageProc - the shape of a
+-- REAL DamageInfo from a normal player hit. The hook logs
+-- at most 5 hits, then goes silent; it never modifies
+-- anything and never blocks a call. Nothing here calls a
+-- damage method and nothing here kills anything. The
+-- DamageInfo fabrication (if the probe shows it is
+-- possible at all) is a later, separately-tested step -
+-- it is NOT attempted here.
+COMMANDS.summon_probe54 = function()
+  local hist = {}
+  local function L(x)
+    hist[#hist + 1] = x
+    wr(DIR .. "summon_expdiag.txt", table.concat(hist, "\n"))
+  end
+  L("== summon_probe54 (bridge 1.89.79) == EXP-credit diagnosis")
+  local function filtFields(title, obj, pats)
+    L("  " .. title)
+    if not obj then L("    (nil)") return end
+    local td = try(function() return obj:get_type_definition() end)
+    for _, f in ipairs(td and try(function() return td:get_fields() end) or {}) do
+      local fn = try(function() return f:get_name() end)
+      if fn then
+        local low = fn:lower()
+        for _, p in ipairs(pats) do
+          if low:find(p) then
+            L("    " .. fn .. " = " .. tostring(try(function() return obj:get_field(fn) end)))
+            break
+          end
+        end
+      end
+    end
+  end
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  local target = nil
+  if pm and list and n then
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    local cfields = ctd and try(function() return ctd:get_fields() end) or {}
+    for i = 0, math.min(n, 40) - 1 do
+      local el = try(function() return list:call("get_Item", i) end)
+      if el then
+        local etd = try(function() return el:get_type_definition() end)
+        local tn = etd and try(function() return etd:get_full_name() end) or "?"
+        local base = tn:match("app%.(Ch%d+)")
+        if base then base = base:lower() end
+        local ch, won, wcat = nil, nil, nil
+        if base then ch, won, wcat = p53_handle_for(pm, cfields, base) end
+        if ch then
+          local isBoss = try(function() return ch:get_field("<IsBoss>k__BackingField") end)
+          local distSq = try(function() return ch:get_field("<DistanceXZSqFromPlayer>k__BackingField") end)
+          local near = (type(distSq) ~= "number") or distSq <= 2500
+          if near then
+            target = { ch = ch, tn = tn, won = won }
+            if isBoss == true then break end
+          end
+        end
+      end
+    end
+  end
+  local hitTd, dmgTypeName = nil, nil
+  if target then
+    L("  target: " .. target.tn .. " via " .. tostring(target.won))
+    local ch = target.ch
+    local hit = try(function() return ch:get_field("<Hit>k__BackingField") end)
+    filtFields("target character fields (killer/attacker/exp/reward/dead/die/owner):", ch,
+      { "killer", "attacker", "exp", "reward", "dead", "die", "owner" })
+    filtFields("target Hit fields (killer/attacker/exp/reward/dead/die/damage):", hit,
+      { "killer", "attacker", "exp", "reward", "dead", "die", "damage" })
+    if hit then
+      hitTd = try(function() return hit:get_type_definition() end)
+      L("  target Hit type=" .. tostring(hitTd and try(function() return hitTd:get_full_name() end)))
+      for _, m in ipairs(hitTd and try(function() return hitTd:get_methods() end) or {}) do
+        local mn = try(function() return m:get_name() end)
+        if mn then
+          local low = mn:lower()
+          if low:find("damage") or low:find("killer") or low:find("attacker") then
+            local pts = try(function() return m:get_param_types() end) or {}
+            local ps = {}
+            for _, t in ipairs(pts) do ps[#ps + 1] = try(function() return t:get_full_name() end) or "?" end
+            local rt = try(function() return m:get_return_type() end)
+            L("    " .. mn .. "(" .. table.concat(ps, ", ") .. ") -> " ..
+              tostring(rt and try(function() return rt:get_full_name() end) or "?"))
+            if mn == "damageProc" and #ps >= 1 then dmgTypeName = ps[1] end
+          end
+        end
+      end
+    end
+  else
+    L("  no in-range target - skipping target sections")
+  end
+  if dmgTypeName then
+    L("  DamageInfo type (damageProc param 1): " .. dmgTypeName)
+    local dtd = try(function() return sdk.find_type_definition(dmgTypeName) end)
+    if dtd then
+      for _, f in ipairs(try(function() return dtd:get_fields() end) or {}) do
+        L("    DamageInfo field: " .. tostring(try(function() return f:get_name() end)))
+      end
+    else
+      L("    type definition not found")
+    end
+    local dtd2 = try(function() return sdk.find_type_definition(dmgTypeName) end)
+    local okI, inst = pcall(function() return dtd2 and dtd2:create_instance() end)
+    L("  TypeDefinition:create_instance: ok=" .. tostring(okI) .. " -> " .. tostring(inst))
+    local okS, inst2 = pcall(function() return sdk.create_instance(dmgTypeName) end)
+    L("  sdk.create_instance: ok=" .. tostring(okS) .. " -> " .. tostring(inst2))
+  else
+    L("  damageProc not found on target Hit - DamageInfo type unknown from here")
+  end
+  local cm = try(function() return sdk.get_managed_singleton("app.CharacterManager") end)
+  local player = cm and try(function() return cm:call("get_ManualPlayer") end)
+  L("  player (ManualPlayer): " .. tostring(player))
+  if player then
+    filtFields("player character fields (exp/level/job):", player, { "exp", "level", "job" })
+    local ctx = name_context_of(player, "app.PlayerPersonalDataContext")
+    L("  player PlayerPersonalDataContext: " .. tostring(ctx))
+    if ctx then filtFields("player context fields (exp/level/job):", ctx, { "exp", "level", "job" }) end
+    local phit = try(function() return player:get_field("<Hit>k__BackingField") end)
+    if phit then
+      local ptd = try(function() return phit:get_type_definition() end)
+      L("  player Hit type=" .. tostring(ptd and try(function() return ptd:get_full_name() end)))
+      for _, m in ipairs(ptd and try(function() return ptd:get_methods() end) or {}) do
+        local mn = try(function() return m:get_name() end)
+        if mn and mn:lower():find("exp") then L("    player Hit method: " .. mn) end
+      end
+    end
+  end
+  if not _G.__exp_hook_armed then
+    local dm = nil
+    if hitTd then
+      for _, m in ipairs(try(function() return hitTd:get_methods() end) or {}) do
+        if try(function() return m:get_name() end) == "damageProc" then dm = m break end
+      end
+    end
+    if dm then
+      local okH, errH = pcall(function()
+        sdk.hook(dm, function(hitObj, dmg)
+          pcall(function()
+            if (_G.__exp_hits or 0) >= 5 then return end
+            _G.__exp_hits = (_G.__exp_hits or 0) + 1
+            hist[#hist + 1] = "  EXP HOOK hit #" .. _G.__exp_hits ..
+              ": DamageInfo type=" .. tostring(dmg and try(function() return dmg:get_type_definition():get_full_name() end))
+            if dmg then
+              local dtd3 = try(function() return dmg:get_type_definition() end)
+              for _, f in ipairs(dtd3 and try(function() return dtd3:get_fields() end) or {}) do
+                local fn = try(function() return f:get_name() end)
+                if fn then
+                  local low = fn:lower()
+                  if low:find("attack") or low:find("damage") or low:find("killer") or low:find("owner") or low:find("hitinfo") or low:find("exp") then
+                    hist[#hist + 1] = "    DamageInfo " .. fn .. " = " ..
+                      tostring(try(function() return dmg:get_field(fn) end))
+                  end
+                end
+              end
+            end
+            wr(DIR .. "summon_expdiag.txt", table.concat(hist, "\n"))
+          end)
+        end)
+      end)
+      if okH then
+        _G.__exp_hook_armed = true
+        L("  damageProc hook ARMED (logs first 5 real hits, modifies nothing)")
+      else
+        L("  damageProc hook failed: " .. tostring(errH))
+      end
+    else
+      L("  damageProc method not found on Hit type - hook not armed")
+    end
+  else
+    L("  damageProc hook already armed (hits logged so far: " .. tostring(_G.__exp_hits or 0) .. ")")
+  end
+  L("== probe54 done - hit an enemy normally, then send summon_expdiag.txt ==")
+  return "summon_probe54: done (hook armed, hit something, then re-send the file)"
+end
+end
+
+---------------------------------------------------------------- v1.89.67: identify nearby enemies (probe 51)
+-- The dropdown is missing bosses the user knows exist
+-- (troll, beholder) because the only naming source
+-- (charRef.lua) has no entries for them - and the game
+-- itself attaches no names. The oracle is the user's own
+-- eyes: stand next to the creature, press Identify, and
+-- this dumps every nearby enemy's type + character id +
+-- catalog code. He reports which one he was looking at,
+-- and the code gets its name from his word (the Cyclops /
+-- Medusa / Satanachia pattern).
+local function sp51_run()
+  local hist = {}
+  local function L(x)
+    hist[#hist + 1] = x
+    wr(DIR .. "summon_identify.txt", table.concat(hist, "\n"))
+  end
+  L("== summon_probe51 (bridge 1.89.67) == identify nearby enemies")
+  local function chara_of(el)
+    local gi = try(function() return el:get_field("<GenerateInfo>k__BackingField") end)
+      or try(function() return el:call("get_GenerateInfo") end)
+    local ci = gi and try(function() return gi:call("get_CommonInfo") end)
+    local oid = ci and try(function() return ci:get_field("_ObjectID") end)
+    local sel = oid and try(function() return oid:get_field("_SelectedCharacterID") end)
+    return sel and tonumber(tostring(sel)) or nil
+  end
+  local function code_of(want)
+    local ctd = try(function() return sdk.find_type_definition("app.CharacterID") end)
+    for _, f in ipairs(ctd and try(function() return ctd:get_fields() end) or {}) do
+      if try(function() return f:is_static() end) then
+        local d = try(function() return f:get_data(nil) end)
+        if d and tonumber(tostring(d)) == want then
+          return try(function() return f:get_name() end)
+        end
+      end
+    end
+    return nil
+  end
+  local pm = try(function() return sdk.get_managed_singleton("app.PawnManager") end)
+  local em = try(function() return sdk.get_managed_singleton("app.EnemyManager") end)
+  local list = em and try(function() return em:get_field("_EnemyList") end)
+  local n = list and try(function() return list:call("get_Count") end)
+  L("  _EnemyList count=" .. tostring(n))
+  if not (list and n) then error("enemy list unavailable - load into the world first") end
+  for i = 0, math.min(n, 40) - 1 do
+    local el = try(function() return list:call("get_Item", i) end)
+    if el then
+      local etd = try(function() return el:get_type_definition() end)
+      local tn = etd and try(function() return etd:get_full_name() end) or "?"
+      local cv = chara_of(el)
+      local code = cv and code_of(cv)
+      L("  [" .. i .. "] type=" .. tn .. " chara=" .. tostring(cv) ..
+         " code=" .. tostring(code))
+    end
+  end
+  L("== identify done - tell me which entry you were standing next to ==")
+  return hist
+end
+
+COMMANDS.summon_probe51 = function()
+  local hist = sp51_run()
+  return "summon_probe51: " .. (hist[#hist] or "done")
+end
+end
+
 ---------------------------------------------------------------- v1.24: fast travel (FastTravelAnywhere core, no hotkeys/UI)
 -- Engine warp via TimeSkipManager.requestPlayerWarp: clean sector streaming and
 -- pawn party teleportation. 6s post-warp fall protection: forces the Jump tab's
@@ -5639,4 +15107,4 @@ re.on_frame(function()
 end)
 
 write_resp("boot", true, "ddbridge ready")
-log.info(TAG .. "v1.89.3 ready (session guard, atomic responses, item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel)")
+log.info(TAG .. "v1.89.82 ready (session guard, atomic responses, item stat dump, augment dump, jump height / air time / no fall damage, core skill dump, learn + unlearn core and weapon skills, ability data dump + predicate probe, appraisal dump, ability rule dump, item type map, upgraded skills, ability probe 2, equipment ability probe, set weapon skill level, weapon skill probe, all pawns, duplicate items, items, rating, badges, weapon/core skills, augments, stats, item editor; target = main pawn or player; faster respawn; fast travel; summon probes, summon boss, kill v14)")

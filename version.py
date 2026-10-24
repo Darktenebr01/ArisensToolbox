@@ -5,11 +5,11 @@ The Lua bridge lives in the game process and cannot import this file, so
 and ``bridge/data/version.txt`` all agree with the values below.
 """
 
-# Desktop client version (shown in the sidebar, build artifacts, releases).
-CLIENT_VERSION = "0.94"
+# Desktop client version (shown in the status bar, build artifacts, releases).
+CLIENT_VERSION = "0.180"
 
 # Game-side bridge version. Bump this whenever ddbridge.lua changes.
-BRIDGE_VERSION = "1.89.3"
+BRIDGE_VERSION = "1.89.82"
 
 # Older/newer patch releases of the bridge are accepted as long as the
 # protocol-compatible major version matches.

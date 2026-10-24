@@ -1,15 +1,18 @@
-"""Item Editor tab: pick an inventory item, edit its weapon-skill slots and appraisal."""
+"""Item Editor: pick an inventory item and edit its skills, appraisal,
+element and name.
+"""
 import math
 import re
-import tkinter as tk
+
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
-    Field, Combo, Check, StyledListbox, run_async, require_client, show_probe,
+    Section, PageHeader, Row, ScrollArea, ListPanel, Frame, Field, Combo,
+    Check, PrimaryButton, GhostButton, QuietButton, caption, dev_only,
+    run_async, require_client, show_probe,
 )
 
 MAX_SHOWN = 400
@@ -20,11 +23,16 @@ class ItemEditorTab(BaseTab):
         super().__init__(parent, fg_color="transparent")
         self.app = app
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self.scroll.grid(row=0, column=0, sticky="nsew")
-        self.scroll.grid_columnconfigure(0, weight=1)
+        header = PageHeader(
+            self, "Item Editor",
+            "Edit the item you have selected: weapon skills, appraisal, "
+            "element, name.")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
+
+        self.scroll = ScrollArea(self)
+        self.scroll.grid(row=1, column=0, sticky="nsew")
 
         # state
         self.owner_idxs = []      # parallel to owner combo values
@@ -34,205 +42,248 @@ class ItemEditorTab(BaseTab):
         self.sel_row = None       # 1-based row id shared via app.selected_item_row
         self.cur_slots = [0, 0, 0, 0]
         self.valid_set = None     # set of skill ids valid for this item type
-        self.filt_ids = []        # skill ids behind slot-combo entries (after the 2 headers)
+        self.filt_ids = []        # skill ids behind slot-combo entries
         self.slot_ids = [[], [], [], []]
         self._filling = False
+        self._search_after = None
 
-        r = 0
-        H1(self.scroll, "Item Editor", row=r, column=0, sticky="w", pady=(0, 10))
-        r += 1
-
-        # inventory card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Inventory", row=0, column=0, sticky="w", pady=(0, 6))
-        orow = ctk.CTkFrame(cc, fg_color="transparent")
-        orow.grid(row=1, column=0, sticky="ew")
-        ctk.CTkLabel(orow, **T.body("Inventory:")).pack(side="left")
+        # -- inventory -------------------------------------------------
+        inv = Section(self.scroll, "Inventory",
+                      **{"row": 0, "column": 0, "sticky": "ew",
+                         "pady": (0, T.PAD_M)})
+        body = inv.body
+        top = Row(body)
+        top.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(top, text="Owner", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.owner_combo = Combo(
-            orow, values=["(click Reload inventory)"],
-            width=340, command=self.on_owner_change,
-        )
-        self.owner_combo.pack(side="left", padx=8)
-        PrimaryButton(orow, text="Reload inventory", width=140,
-                      command=self.reload_owners).pack(side="left")
+            top, values=["(click Reload inventory)"], width=340,
+            command=self.on_owner_change)
+        self.owner_combo.set("(click Reload inventory)")
+        self.owner_combo.pack(side="left")
+        QuietButton(top, "Reload inventory", width=132,
+                    command=self.reload_owners).pack(side="left",
+                                                     padx=(T.PAD_S, 0))
+        caption(body, "Reloads the inventory of the current save; the first "
+                      "owner is picked automatically.",
+                row=1, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
-        # items card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Items", row=0, column=0, sticky="w", pady=(0, 6))
-        srow = ctk.CTkFrame(cc, fg_color="transparent")
-        srow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(srow, **T.body("Search:")).pack(side="left")
+        # -- items -----------------------------------------------------
+        items = Section(self.scroll, "Items",
+                        **{"row": 1, "column": 0, "sticky": "ew",
+                           "pady": (0, T.PAD_M)})
+        body = items.body
+        body.grid_rowconfigure(2, weight=1)
+        filters = Row(body)
+        filters.grid(row=0, column=0, sticky="ew", pady=(0, T.PAD_S))
+        ctk.CTkLabel(filters, text="Search", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.search_var = ctk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self.refresh_list())
-        Field(srow, textvariable=self.search_var, width=200).pack(side="left", padx=8)
+        self.search_var.trace_add("write", lambda *_: self._debounced_refresh())
+        Field(filters, textvariable=self.search_var, width=220).pack(
+            side="left")
         self.equip_var = ctk.BooleanVar(value=True)
-        Check(srow, text="Only weapons/armor/jewelry", variable=self.equip_var,
-              command=self.on_filter_toggle).pack(side="left", padx=8)
+        Check(filters, text="Equipment only", variable=self.equip_var,
+              command=self.on_filter_toggle).pack(side="left",
+                                                  padx=(T.PAD_M, 0))
         self.equipped_var = ctk.BooleanVar(value=False)
-        Check(srow, text="Only equipped", variable=self.equipped_var,
-              command=self.on_filter_toggle).pack(side="left", padx=8)
+        Check(filters, text="Equipped only", variable=self.equipped_var,
+              command=self.on_filter_toggle).pack(side="left",
+                                                  padx=(T.PAD_M, 0))
 
-        lframe = ctk.CTkFrame(cc, fg_color="transparent")
-        lframe.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
-        lframe.grid_columnconfigure(0, weight=1)
-        self.listbox = StyledListbox(lframe, height=8)
-        self.listbox.grid(row=0, column=0, sticky="nsew")
+        self.panel = ListPanel(body, height=9,
+                               empty="Reload the inventory to list items.")
+        self.panel.grid(row=1, column=0, sticky="nsew")
+        self.listbox = self.panel.listbox
         self.listbox.bind("<<ListboxSelect>>", self.on_row_select)
-        sb = tk.Scrollbar(lframe, orient="vertical", command=self.listbox.yview)
-        sb.grid(row=0, column=1, sticky="ns")
-        self.listbox.config(yscrollcommand=sb.set)
-
         self.sel_var = ctk.StringVar(value="Click an item above to edit it.")
-        ctk.CTkLabel(cc, textvariable=self.sel_var,
-                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
-            row=3, column=0, sticky="w")
+        ctk.CTkLabel(body, textvariable=self.sel_var,
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED,
+                     anchor="w").grid(row=2, column=0, sticky="ew",
+                                      pady=(T.PAD_S, 0))
 
-        # skill slots card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Weapon skill slots", row=0, column=0, sticky="w", pady=(0, 6))
-        frow = ctk.CTkFrame(cc, fg_color="transparent")
-        frow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(frow, **T.body("Filter skill list:")).pack(side="left")
+        # -- skill slots ----------------------------------------------
+        slots = Section(self.scroll, "Weapon skill slots",
+                        hint="Changing a slot writes to the item immediately; "
+                             "press Apply to commit it to the game.",
+                        **{"row": 2, "column": 0, "sticky": "ew",
+                           "pady": (0, T.PAD_M)})
+        body = slots.body
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+        filt = Row(body)
+        filt.grid(row=0, column=0, columnspan=2, sticky="ew",
+                  pady=(0, T.PAD_S))
+        ctk.CTkLabel(filt, text="Filter skills",
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED).pack(
+            side="left", padx=(0, T.PAD_S))
         self.skill_filter_var = ctk.StringVar()
         self.skill_filter_var.trace_add("write", lambda *_: self.on_skill_filter())
-        Field(frow, textvariable=self.skill_filter_var, width=200).pack(side="left", padx=8)
+        Field(filt, textvariable=self.skill_filter_var, width=200).pack(
+            side="left")
         self.valid_var = ctk.BooleanVar(value=False)
-        Check(frow, text="Only skills valid for this item type",
+        Check(filt, text="Only skills valid for this item type",
               variable=self.valid_var,
-              command=self.on_valid_toggle).pack(side="left", padx=8)
-        GhostButton(frow, text="Type/skill map report", width=170,
-                    command=lambda: self.run_probe_cmd(
-                        "eqmap_build", "eqmap.txt",
-                        "Item types and the skills seen on them")).pack(side="right")
+              command=self.on_valid_toggle).pack(side="left", padx=(T.PAD_M, 0))
+        dev_only(self, lambda: QuietButton(
+            filt, "Type/skill map", width=120,
+            command=lambda: self.run_probe_cmd(
+                "eqmap_build", "eqmap.txt",
+                "Item types and the skills seen on them")).pack(
+                    side="right"))
 
         self.slot_combos = []
         for s in range(4):
-            srow = ctk.CTkFrame(cc, fg_color="transparent")
-            srow.grid(row=2 + s, column=0, sticky="ew", pady=2)
-            srow.grid_columnconfigure(1, weight=1)
-            ctk.CTkLabel(srow, **T.body(f"Slot {s + 1}:")).grid(row=0, column=0, padx=(0, 8))
-            cb = Combo(
-                srow, values=["(select an item first)"],
-                command=lambda v, s=s: self.on_slot_select(s, v),
-            )
+            cell = Frame(body)
+            cell.grid(row=1 + s // 2, column=s % 2, sticky="ew",
+                      padx=(0, T.PAD_M) if s % 2 == 0 else (0, 0),
+                      pady=(0, T.PAD_S))
+            cell.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(cell, text=f"Slot {s + 1}",
+                         font=T.font(T.SIZE_SMALL), text_color=T.MUTED,
+                         width=46, anchor="w").grid(row=0, column=0,
+                                                    sticky="w")
+            cb = Combo(cell, values=["(select an item first)"],
+                       command=lambda v, s=s: self.on_slot_select(s, v))
             cb.grid(row=0, column=1, sticky="ew")
             cb.set("(select an item first)")
             self.slot_combos.append(cb)
 
-        brow = ctk.CTkFrame(cc, fg_color="transparent")
-        brow.grid(row=6, column=0, sticky="ew", pady=(8, 0))
-        GhostButton(brow, text="Clear all slots", width=120,
-                    command=self.clear_slots).pack(side="left", padx=(0, 8))
-        PrimaryButton(brow, text="APPLY to game (sync + recalc)", width=220,
-                      command=self.apply_to_game).pack(side="left")
+        brow = Row(body)
+        brow.grid(row=4, column=0, columnspan=2, sticky="ew",
+                  pady=(T.PAD_S, 0))
+        brow.add(QuietButton(brow, "Clear all slots", width=124,
+                             command=self.clear_slots))
+        brow.add(PrimaryButton(brow, "Apply to game", width=170,
+                               command=self.apply_to_game))
+        caption(body, "Apply syncs the item and recalculates its stats.",
+                row=5, column=0, columnspan=2, sticky="ew",
+                pady=(T.PAD_S, 0))
 
-        # appraisal card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Appraisal values", row=0, column=0, sticky="w", pady=(0, 6))
-        arow = ctk.CTkFrame(cc, fg_color="transparent")
-        arow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        # -- appraisal + element --------------------------------------
+        duo = Frame(self.scroll)
+        duo.grid(row=3, column=0, sticky="ew", pady=(0, T.PAD_M))
+        duo.grid_columnconfigure(0, weight=1)
+        duo.grid_columnconfigure(1, weight=1)
+
+        appr = Section(duo, "Appraisal", **{"row": 0, "column": 0,
+                                            "sticky": "nsew",
+                                            "padx": (0, T.PAD_M)})
+        body = appr.body
+        labels = ["Physical", "Magic", "Blow", "Weight"]
         self.ap_vars = []
-        for i, n in enumerate(["Physical:", "Magic:", "Blow:", "Weight:"]):
-            ctk.CTkLabel(arow, **T.body(n)).pack(side="left", padx=(0 if i == 0 else 12, 4))
-            v = ctk.StringVar(value="0")
-            Field(arow, textvariable=v, width=60).pack(side="left")
-            self.ap_vars.append(v)
-        arow2 = ctk.CTkFrame(cc, fg_color="transparent")
-        arow2.grid(row=2, column=0, sticky="ew")
+        grid_ap = Frame(body)
+        grid_ap.grid(row=0, column=0, sticky="ew")
+        for i, (label, _n) in enumerate(zip(labels, range(4))):
+            ctk.CTkLabel(grid_ap, text=label, font=T.font(T.SIZE_SMALL),
+                         text_color=T.MUTED).grid(row=0, column=i * 2,
+                                                  sticky="w",
+                                                  padx=(0 if i == 0 else T.PAD_S,
+                                                        3))
+            var = ctk.StringVar(value="0")
+            Field(grid_ap, textvariable=var, width=62).grid(
+                row=1, column=i * 2, padx=(0 if i == 0 else T.PAD_S, 3),
+                pady=(2, 0))
+            self.ap_vars.append(var)
         self.appr_var = ctk.BooleanVar(value=False)
-        Check(arow2, text="IsAppraised",
-              variable=self.appr_var).pack(side="left", padx=(0, 12))
-        PrimaryButton(arow2, text="Apply appraisal", width=140,
-                      command=self.apply_appraisal).pack(side="left")
-        Muted(cc, "Written to the item, then synced + recalculated.",
-              row=3, column=0, sticky="w", pady=(8, 0))
+        Check(body, text="IsAppraised", variable=self.appr_var).grid(
+            row=1, column=0, sticky="w", pady=(T.PAD_S, T.PAD_S))
+        PrimaryButton(body, "Apply appraisal", width=150,
+                      command=self.apply_appraisal).grid(row=2, column=0,
+                                                         sticky="w")
 
-        # element card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Element", row=0, column=0, sticky="w", pady=(0, 6))
-        erow = ctk.CTkFrame(cc, fg_color="transparent")
-        erow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(erow, **T.body("Element:")).pack(side="left")
-        self.elem_combo = Combo(
-            erow, values=["(select an item first)"], width=240)
-        self.elem_combo.pack(side="left", padx=8)
+        elem = Section(duo, "Element", **{"row": 0, "column": 1,
+                                          "sticky": "nsew"})
+        body = elem.body
+        self.elem_combo = Combo(body, values=["(select an item first)"],
+                                width=240)
+        self.elem_combo.grid(row=0, column=0, sticky="ew")
         self.elem_combo.set("(select an item first)")
-        PrimaryButton(erow, text="Apply element", width=130,
-                      command=self.apply_element).pack(side="left")
-        prow = ctk.CTkFrame(cc, fg_color="transparent")
-        prow.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(prow, **T.body("Element %:")).pack(side="left")
+        prow = Row(body)
+        prow.grid(row=1, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        ctk.CTkLabel(prow, text="Element %", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.elem_pct_var = ctk.StringVar(value="")
-        Field(prow, textvariable=self.elem_pct_var, width=70).pack(side="left", padx=8)
-        PrimaryButton(prow, text="Apply %", width=90,
-                      command=self.apply_elem_pct).pack(side="left")
-        GhostButton(prow, text="Clear %", width=90,
-                    command=self.clear_elem_pct).pack(side="left", padx=8)
+        Field(prow, textvariable=self.elem_pct_var, width=70).pack(
+            side="left")
+        QuietButton(prow, "Apply %", width=82,
+                    command=self.apply_elem_pct).pack(side="left",
+                                                      padx=(T.PAD_S, 0))
+        QuietButton(prow, "Clear", width=64,
+                    command=self.clear_elem_pct).pack(side="left",
+                                                      padx=(T.PAD_XS, 0))
+        brow = Row(body)
+        brow.grid(row=2, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        brow.add(PrimaryButton(brow, "Apply element", width=140,
+                               command=self.apply_element))
         self.elem_info_var = ctk.StringVar(value="")
-        ctk.CTkLabel(cc, textvariable=self.elem_info_var,
-                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
-            row=3, column=0, sticky="w")
-        Muted(cc, "Only one enhancement works per item (blue triangle) - setting "
-              "an element replaces any enhanced ability/stat bonus. The item "
-              "is marked appraised so the element shows in game. "
-              "Element restrictions are lifted automatically when the bridge "
-              "loads, so any weapon can take any element and forced elements "
-              "stay after a restart.",
-              row=4, column=0, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(body, textvariable=self.elem_info_var,
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED,
+                     anchor="w", justify="left").grid(
+            row=3, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        caption(body, "One enhancement works per item: an element replaces "
+                      "any ability or stat bonus, and the item is marked "
+                      "appraised so it shows in game.",
+                row=4, column=0, sticky="ew", pady=(T.PAD_XS, 0))
 
-        # rename card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Rename item", row=0, column=0, sticky="w", pady=(0, 6))
-        nrow = ctk.CTkFrame(cc, fg_color="transparent")
-        nrow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(nrow, **T.body("New name:")).pack(side="left")
+        # -- rename ---------------------------------------------------
+        rename = Section(self.scroll, "Rename",
+                         hint="Renames every copy of this item type. Clear "
+                              "removes the saved rename.",
+                         **{"row": 4, "column": 0, "sticky": "ew",
+                            "pady": (0, T.PAD_M)})
+        body = rename.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(row, text="New name", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.rename_var = ctk.StringVar(value="")
-        Field(nrow, textvariable=self.rename_var, width=260).pack(side="left", padx=8)
-        PrimaryButton(nrow, text="Apply name", width=110,
-                      command=self.apply_item_name).pack(side="left")
-        GhostButton(nrow, text="Clear name", width=110,
-                    command=self.clear_item_name).pack(side="left", padx=8)
-        dev_only(self, lambda: GhostButton(nrow, text="DIAG name", width=100,
-                    command=self.diag_item_name).pack(side="left"))
-        dev_only(self, lambda: GhostButton(nrow, text="PROBE type", width=100,
-                    command=self.probe_item_type).pack(side="left", padx=8))
-        Muted(cc, "Renames all items of this type in game (names are shared "
-              "per item type). The rename is re-applied when the inventory "
-              "loads. Clear removes the saved rename; restart the game to "
-              "restore the original name.",
-              row=2, column=0, sticky="w", pady=(8, 0))
+        Field(row, textvariable=self.rename_var, width=260).pack(side="left")
+        PrimaryButton(row, "Apply name", width=116,
+                      command=self.apply_item_name).pack(side="left",
+                                                        padx=(T.PAD_S, 0))
+        GhostButton(row, "Clear name", width=110,
+                    command=self.clear_item_name).pack(side="left",
+                                                       padx=(T.PAD_S, 0))
+        dev_only(self, lambda: QuietButton(row, "Diagnose", width=96,
+                                          command=self.diag_item_name).pack(
+            side="left", padx=(T.PAD_S, 0)))
+        dev_only(self, lambda: QuietButton(row, "Probe type", width=100,
+                                          command=self.probe_item_type).pack(
+            side="left", padx=(T.PAD_S, 0)))
 
-        # probes card
-        card = Card(self.scroll, row=r, column=0, sticky="ew", padx=4, pady=6)
-        r += 1
-        cc = card_content(card)
-        H2(cc, "Probes", row=0, column=0, sticky="w", pady=(0, 6))
-        prow = ctk.CTkFrame(cc, fg_color="transparent")
-        prow.grid(row=1, column=0, sticky="ew")
-        dev_only(self, lambda: GhostButton(prow, text="DUMP ability rules", width=170,
-                    command=lambda: self.run_probe_cmd(
-                        "abil_dump", "abildump.txt",
-                        "Ability rule dump - copy all of it")).pack(side="left", padx=(0, 6)))
-        dev_only(self, lambda: GhostButton(prow, text="DUMP appraisal rules (2)", width=190,
-                    command=lambda: self.run_probe_cmd(
-                        "abil_dump2", "abildump2.txt",
-                        "Appraisal rule dump - copy all of it")).pack(side="left", padx=6))
-        dev_only(self, lambda: GhostButton(prow, text="DUMP ability data + probe (3)", width=230,
-                    command=lambda: self.run_probe_cmd(
-                        "abil_dump3", "abildump3.txt",
-                        "Ability data dump 3 - copy all of it (can take a while)")).pack(side="left", padx=6))
+        # -- probes (dev only) ---------------------------------------
+        probes = Frame(self.scroll)
+        probes.grid(row=5, column=0, sticky="ew")
+        row = Row(probes)
+        row.grid(row=0, column=0, sticky="w")
+        dev_only(self, lambda: QuietButton(
+            row, "Ability rules", width=120,
+            command=lambda: self.run_probe_cmd(
+                "abil_dump", "abildump.txt",
+                "Ability rule dump")).pack(side="left"))
+        dev_only(self, lambda: QuietButton(
+            row, "Appraisal rules", width=130,
+            command=lambda: self.run_probe_cmd(
+                "abil_dump2", "abildump2.txt",
+                "Appraisal rule dump")).pack(side="left",
+                                              padx=(T.PAD_S, 0)))
+        dev_only(self, lambda: QuietButton(
+            row, "Ability data", width=120,
+            command=lambda: self.run_probe_cmd(
+                "abil_dump3", "abildump3.txt",
+                "Ability data dump")).pack(side="left",
+                                           padx=(T.PAD_S, 0)))
+
+    # -- search -------------------------------------------------------
+
+    def _debounced_refresh(self):
+        if self._search_after is not None:
+            try:
+                self.after_cancel(self._search_after)
+            except Exception:
+                pass
+        self._search_after = self.after(140, self.refresh_list)
 
     # -- owners -------------------------------------------------------
 
@@ -253,7 +304,7 @@ class ItemEditorTab(BaseTab):
                     i, key, count, isp = m.groups()
                     idxs.append(int(i))
                     labels.append(f"owner {key} ({count} items)"
-                                  + ("  <- YOU" if isp == "1" else ""))
+                                  + ("  ← you" if isp == "1" else ""))
             self.owner_idxs = idxs
 
             def _ui():
@@ -312,7 +363,8 @@ class ItemEditorTab(BaseTab):
             return
         equip = 1 if self.equip_var.get() else 0
         equipped = 1 if self.equipped_var.get() else 0
-        run_async(self, lambda: self._load_rows(client, oi, equip, equipped, after))
+        run_async(self, lambda: self._load_rows(client, oi, equip, equipped,
+                                                after))
 
     def _load_rows(self, client, oi, equip, equipped, after):
         try:
@@ -327,7 +379,8 @@ class ItemEditorTab(BaseTab):
                     slots = (slots + [0, 0, 0, 0])[:4]
                     rows.append({"i": int(m.group(1)), "name": m.group(2),
                                  "lname": m.group(2).lower(),
-                                 "equipped": m.group(3) == "1", "slots": slots})
+                                 "equipped": m.group(3) == "1",
+                                 "slots": slots})
             self.item_rows = rows
 
             def _ui():
@@ -344,19 +397,27 @@ class ItemEditorTab(BaseTab):
         tokens = self.search_var.get().lower().split()
         enum = self.app.enum_data or {}
         equip_name = enum.get("equipName", {})
-        self.listbox.delete(0, tk.END)
+        rows = []
         self.shown_rows = []
         for r in self.item_rows:
-            if all(t in r["lname"] for t in tokens) and len(self.shown_rows) < MAX_SHOWN:
-                self.shown_rows.append(r)
-                tags = [str(equip_name.get(i, i)) for i in r["slots"] if i != 0]
-                self.listbox.insert(
-                    tk.END,
-                    ("[E] " if r["equipped"] else "    ") + r["name"]
-                    + "   {" + ", ".join(tags) + "}",
-                )
+            sid = str(r["i"])
+            if not all(t in r["lname"] or t in sid for t in tokens):
+                continue
+            if len(self.shown_rows) >= MAX_SHOWN:
+                break
+            self.shown_rows.append(r)
+            tags = [str(equip_name.get(i, i)) for i in r["slots"] if i != 0]
+            rows.append(("● " if r["equipped"] else "  ") + r["name"]
+                        + (f"   · {', '.join(tags)}" if tags else ""))
+        self.panel.set_rows(rows)
+        self.panel.set_empty(
+            "No item matches this search." if self.item_rows
+            else "Reload the inventory to list items.")
         if self.item_rows:
-            self.app.set_status(f"{len(self.shown_rows)} shown.")
+            shown = len(self.shown_rows)
+            extra = " (first %d)" % MAX_SHOWN if shown >= MAX_SHOWN else ""
+            self.panel.set_empty(f"No item matches this search{extra}.")
+            self.app.set_status(f"{shown} item(s) shown{extra}.")
 
     def on_row_select(self, _event):
         sel = self.listbox.curselection()
@@ -380,27 +441,28 @@ class ItemEditorTab(BaseTab):
         try:
             res = client.send("item_get", row, timeout=15)
             p = res.split(",")
-            slots = [(int(p[i]) if i < len(p) and p[i].lstrip("-").isdigit() else 0)
-                      for i in range(4)]
+            slots = [(int(p[i]) if i < len(p) and p[i].lstrip("-").isdigit()
+                      else 0) for i in range(4)]
             appr = len(p) > 4 and p[4] == "1"
             ap_vals = [(p[5 + i] if len(p) > 5 + i else "0") for i in range(4)]
             equipped = len(p) > 9 and p[9] == "1"
-            name = next((r["name"] for r in self.item_rows if r["i"] == row), "?")
+            name = next((r["name"] for r in self.item_rows if r["i"] == row),
+                        "?")
             self.cur_slots = slots
             self.app.selected_item_row = row
             self.app.selected_item_name = name
-            need_valid = self.valid_var.get()
 
             def _ui():
                 self.appr_var.set(appr)
                 for i in range(4):
                     self.ap_vars[i].set(ap_vals[i])
                 self.fill_slot_combos()
-                if need_valid:
+                if self.valid_var.get():
                     self.load_valid(rescan=False)
                 self.sel_var.set(
-                    f"Editing: {name}"
-                    + ("  (equipped - press APPLY to game after changes)" if equipped else ""))
+                    f"Editing {name}"
+                    + ("  ·  equipped (press Apply after changes)"
+                       if equipped else ""))
             self.after(0, _ui)
             self.load_element()
             self.load_item_name()
@@ -463,7 +525,7 @@ class ItemEditorTab(BaseTab):
     def _set_slot(self, client, row, slot, sid):
         try:
             res = client.send("item_set_slot", row, slot, sid, timeout=15)
-            msg = res + "  - now press APPLY to game"
+            msg = res + "  - now press Apply to game"
 
             def _ui():
                 self.load_rows(after=lambda: (self.select_item(),
@@ -486,7 +548,7 @@ class ItemEditorTab(BaseTab):
     def _clear_slots(self, client, row):
         try:
             res = client.send("item_clear", row, timeout=15)
-            msg = res + "  - now press APPLY to game"
+            msg = res + "  - now press Apply to game"
 
             def _ui():
                 self.load_rows(after=lambda: (self.select_item(),
@@ -534,7 +596,8 @@ class ItemEditorTab(BaseTab):
 
     def _apply_appraisal(self, client, row, vals, appr):
         try:
-            res = client.send("item_set_appraisal", row, *vals, appr, timeout=15)
+            res = client.send("item_set_appraisal", row, *vals, appr,
+                              timeout=15)
             self.after(0, lambda: self.app.set_status(f"Applied: {res}"))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
@@ -612,10 +675,10 @@ class ItemEditorTab(BaseTab):
                 pct_txt += f" (override: {over}%)"
             else:
                 pct_txt += " (game default)"
-            info = (f"Current: {cur_label}  |  Game computes: {game_elem}  |  "
+            info = (f"Current: {cur_label}  ·  Game computes: {game_elem}  ·  "
                     f"{pct_txt}")
             if note:
-                info += f"  |  {note}"
+                info += f"  ·  {note}"
 
             def _ui():
                 self.elem_combo.configure(values=values)
@@ -631,7 +694,8 @@ class ItemEditorTab(BaseTab):
                     values=["(this item has no ability data)"])
                 self.elem_combo.set("(this item has no ability data)")
                 self.elem_info_var.set("")
-            self.after(0, lambda: (self.app.set_status(err), _ui2()))
+                self.app.set_status(err)
+            self.after(0, _ui2)
 
     def apply_element(self):
         if not self.sel_row:
@@ -733,8 +797,7 @@ class ItemEditorTab(BaseTab):
     def _probe_item_type(self, client, row):
         try:
             res = client.send("item_type_probe", row, timeout=15)
-            msg = res
-            self.after(0, lambda: self.app.set_status(msg))
+            self.after(0, lambda: self.app.set_status(res))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -742,8 +805,7 @@ class ItemEditorTab(BaseTab):
     def _diag_item_name(self, client):
         try:
             res = client.send("item_name_diag", timeout=15)
-            msg = res
-            self.after(0, lambda: self.app.set_status(msg))
+            self.after(0, lambda: self.app.set_status(res))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -834,13 +896,16 @@ class ItemEditorTab(BaseTab):
                 self.fill_slot_combos()
                 self.app.set_status(
                     f"Item type: {label} ({n} items scanned) - "
-                    f"{len(self.valid_set)} skills seen on this type. "
-                    "Skills never seen on it are hidden.")
+                    f"{len(self.valid_set)} skills seen on this type.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             self.valid_set = None
-            self.after(0, lambda: (self.fill_slot_combos(),
-                                   self.app.set_status(f"Item type map: {e}")))
+            err = f"Item type map: {e}"
+
+            def _ui():
+                self.fill_slot_combos()
+                self.app.set_status(err)
+            self.after(0, _ui)
 
     # -- probes -------------------------------------------------------
 

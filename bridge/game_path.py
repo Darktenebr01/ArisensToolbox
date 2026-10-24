@@ -1,5 +1,7 @@
 """Find the Arisen's Toolbox data directory: <game>/reframework/data/ddbridge/."""
 import os
+import re
+import subprocess
 import sys
 
 DATA_SUBDIR = os.path.join("reframework", "data", "ddbridge")
@@ -146,6 +148,35 @@ def game_exe_name():
     """Exe file name to look for when checking if the game runs."""
     custom = get_custom_exe()
     return os.path.basename(custom) if custom else "DD2.exe"
+
+
+def game_running():
+    """True when the game process is running (Windows tasklist; the
+    client is Windows-only). Any failure reads as not running - callers
+    that write files still hit the OS lock if the game is actually up.
+    (Restored in v0.96: the v0.93 restructure dropped this helper while
+    connection.py kept calling it, which broke Start.)"""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {game_exe_name()}", "/NH"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+    except Exception:
+        return False
+    return game_exe_name().lower() in (out or "").lower()
+
+
+def installed_lua_version(path):
+    """Version string from an installed ddbridge.lua header
+    ('-- ddbridge.lua  v1.89.4 ...'), or None if unreadable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.read(200)
+    except OSError:
+        return None
+    m = re.search(r"v(\d+\.\d+\.\d+)", head)
+    return m.group(1) if m else None
 
 
 def find_game_dir():

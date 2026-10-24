@@ -24,9 +24,17 @@ for f in sorted(glob.glob('ui/**/*.py', recursive=True)):
                     exc = (j + 1, m.group(1))
             if exc:
                 _, name = exc
-                # same-line reference to the except-var inside the lambda
-                seg = ln[ln.index('lambda'):]
-                if re.search(r'\{' + re.escape(name) + r'\}|\b' + re.escape(name) + r'\b', seg):
+                # The lambda may span several lines (v0.96: a two-line
+                # tuple lambda hid an except-var on its second line).
+                # Accumulate until the after( call's parens balance.
+                span = ln[ln.index('lambda'):]
+                depth = ln.count('(') - ln.count(')')
+                k = i
+                while depth > 0 and k + 1 < len(lines):
+                    k += 1
+                    span += '\n' + lines[k]
+                    depth += lines[k].count('(') - lines[k].count(')')
+                if re.search(r'\{' + re.escape(name) + r'\}|\b' + re.escape(name) + r'\b', span):
                     print(f"{f}:{i+1}: deferred lambda uses except-var '{name}' (except at line {exc[0]})")
                     print(f"    {ln.strip()[:110]}")
                     bad += 1

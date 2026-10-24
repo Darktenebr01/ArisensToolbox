@@ -6,6 +6,14 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-pip install --quiet customtkinter
+python -m pip install --quiet customtkinter
+if errorlevel 1 (
+    echo ERROR: could not install customtkinter - see the error above.
+    pause
+    exit /b 1
+)
 python main.py
+if errorlevel 1 (
+    echo ERROR: the program exited with an error - see the traceback above.
+)
 pause

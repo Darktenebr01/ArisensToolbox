@@ -8,9 +8,9 @@ pull requests are what actually get merged.
 
 Open an issue with the bug report template and include:
 
-- **Which tool**: the desktop app (version from the sidebar, e.g. v0.94)
-  or the cheat table (e.g. CT v1.8) — they share the bridge but are
-  separate front-ends.
+- **Which tool**: the desktop app (version in the status bar, e.g. v0.177) or
+  the cheat table (e.g. CT v1.8). They share the bridge but are separate
+  front-ends.
 - **Game version** (Steam, Title Update) and whether REFramework and
   the bridge connected OK (the app's Connection tab / the CT's Connect
   log both say so — paste that log).
@@ -28,17 +28,21 @@ when that is the case.
 
 ## Development setup
 
-- Windows, Python 3.11+.
+- Windows, Python 3.10+.
 - `pip install -r requirements.txt -r requirements-dev.txt`
 - Run the app: `python main.py` (or `run.bat`).
 - Run the tests: `python -m unittest discover -s tests`
-- Before opening a PR, also run `python deferredcheck.py` — it catches
-  a real crash class this project has shipped before (an exception
-  variable used inside a deferred UI callback).
+- Before opening a PR, also run `python deferredcheck.py`. It catches a real
+  crash class this project has shipped before (an exception variable used
+  inside a deferred UI callback).
+- Set `DD2BRIDGE_DEV=1` (or add `dev_mode.txt`) to show the developer screens
+  and probe buttons.
 
-The game-side bridge is `bridge/data/ddbridge.lua`. If you change it,
-the Lua must still parse cleanly (CI checks it) and the client/bridge
-versions must stay in sync (`version.py` is the single source).
+New screens should follow `docs/DESIGN.md`: build them from `PageHeader`,
+`Section`, `Row` and `ListPanel` rather than composing colours and fonts
+locally. The game-side bridge is `bridge/data/ddbridge.lua`. If you change it,
+the Lua must still parse cleanly (CI checks it) and the client/bridge versions
+must stay in sync (`version.py` is the single source).
 
 ## Pull requests
 
