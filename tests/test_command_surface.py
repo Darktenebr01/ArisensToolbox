@@ -51,6 +51,24 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertIn("RESPAWN.active = true", LUA)   # respawn_set
         self.assertIn("RESPAWN.active = false", LUA)  # respawn_reset
 
+    def test_core_skill_unlearn_commands(self):
+        # Unlearning removes ids from SkillContext.EnableNormalSkills; the
+        # commands must exist and keep the read-back path.
+        cmds = lua_commands()
+        self.assertIn("disable_nskill", cmds)
+        self.assertIn("disable_nskills", cmds)
+        self.assertIn("EnableNormalSkills", LUA)
+        self.assertIn("isNormalSkillEnable", LUA)
+
+    def test_weapon_skill_unlearn_commands(self):
+        # Weapon skills are entries in EnabledCustomSkills, so unlearning
+        # removes entries and verifies with isCustomSkillEnable.
+        cmds = lua_commands()
+        self.assertIn("disable_wskill", cmds)
+        self.assertIn("disable_wskills", cmds)
+        self.assertIn("EnabledCustomSkills", LUA)
+        self.assertIn("isCustomSkillEnable", LUA)
+
     def test_give_item_bounds_in_lua(self):
         self.assertIn("qty > 9999", LUA)
 

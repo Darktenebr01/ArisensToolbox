@@ -1,14 +1,12 @@
-"""Stat Search tab: filter every numeric field of the character's contexts."""
-import tkinter as tk
+"""Stat Search: filter every numeric field of the character's contexts."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    run_async, require_client,
-    Card, card_content, H1, Muted,
-    PrimaryButton, GhostButton, Field, Combo, StyledListbox,
+    Section, PageHeader, Row, ListPanel, Field, Combo, PrimaryButton,
+    GhostButton, QuietButton, caption, run_async, require_client,
 )
 
 PRESETS = [
@@ -22,7 +20,8 @@ PRESETS = [
     ("Encumbrance", "weight,encumb,burden,load"),
     ("Resistances", "regist,resist"),
     ("Elements", "fire,ice,thunder,elem,dark,light"),
-    ("Debilitations", "poison,sleep,silence,curse,torpor,blind,stun,debuff,abnormal"),
+    ("Debilitations", "poison,sleep,silence,curse,torpor,blind,stun,debuff,"
+                      "abnormal"),
     ("Base values", "base"),
 ]
 
@@ -38,55 +37,62 @@ class StatSearchTab(BaseTab):
         self.grid_rowconfigure(2, weight=1)
         app.register_refreshable(self)
 
-        H1(self, "Stat Search", row=0, column=0, sticky="w", pady=(0, 8))
+        PageHeader(
+            self, "Stat Search",
+            "Filter every numeric field the character exposes, then set or "
+            "lock one by name.").grid(row=0, column=0, sticky="ew",
+                                      pady=(0, T.PAD_L))
 
-        # search card: preset + filter
-        srch_card = Card(self, row=1, column=0, sticky="ew", padx=4, pady=6)
-        prow = card_content(srch_card)
-        prow.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(prow, text="Preset:", text_color=T.TEXT).grid(
-            row=0, column=0, sticky="w")
+        search = Section(self, "Filter", **{"row": 1, "column": 0,
+                                            "sticky": "ew",
+                                            "pady": (0, T.PAD_M)})
+        body = search.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(row, text="Preset", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.preset_var = ctk.StringVar(value=PRESETS[0][0])
-        self.preset_combo = Combo(
-            prow, variable=self.preset_var,
-            values=[p[0] for p in PRESETS], width=170,
-            command=self._on_preset)
-        self.preset_combo.grid(row=0, column=1, padx=(4, 0), sticky="w")
-        Muted(prow, "Filter (words, comma separated; or =1252 to find fields holding that value):",
-              row=1, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        self.preset_combo = Combo(row, variable=self.preset_var,
+                                  values=[p[0] for p in PRESETS], width=170,
+                                  command=self._on_preset)
+        self.preset_combo.pack(side="left")
         self.filter_var = ctk.StringVar(value=PRESETS[0][1])
-        Field(prow, textvariable=self.filter_var, width=420).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=4)
-        PrimaryButton(prow, "Search", command=self.search_async,
-                      width=135).grid(row=2, column=2, sticky="w", padx=(12, 0), pady=4)
+        Field(row, textvariable=self.filter_var, width=320).pack(
+            side="left", padx=(T.PAD_M, 0))
+        PrimaryButton(row, "Search", width=110,
+                      command=self.search_async).pack(side="left",
+                                                       padx=(T.PAD_M, 0))
+        caption(body, "Words are comma separated. Use =1252 to find fields "
+                      "holding that exact value.",
+                row=1, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
-        # results card
-        res_card = Card(self, row=2, column=0, sticky="nsew", padx=4, pady=6)
-        res = card_content(res_card)
-        res.grid_columnconfigure(0, weight=1)
-        res.grid_rowconfigure(0, weight=1)
-        self.flist = StyledListbox(res)
-        self.flist.grid(row=0, column=0, sticky="nsew")
-        sb = tk.Scrollbar(res, orient="vertical", command=self.flist.yview)
-        sb.grid(row=0, column=1, sticky="ns")
-        self.flist.config(yscrollcommand=sb.set)
+        results = Section(self, "Results", **{"row": 2, "column": 0,
+                                              "sticky": "nsew",
+                                              "pady": (0, T.PAD_M)})
+        body = results.body
+        body.grid_rowconfigure(0, weight=1)
+        self.panel = ListPanel(body, height=10,
+                               empty="Search to list matching fields.")
+        self.panel.grid(row=0, column=0, sticky="nsew")
+        self.flist = self.panel.listbox
 
-        # edit card
-        edit_card = Card(self, row=3, column=0, sticky="ew", padx=4, pady=6)
-        vrow = card_content(edit_card)
-        ctk.CTkLabel(vrow, text="New value:", text_color=T.TEXT).grid(
-            row=0, column=0, sticky="w")
+        edit = Section(self, "Edit", **{"row": 3, "column": 0, "sticky": "ew"})
+        body = edit.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(row, text="New value", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.val_var = ctk.StringVar(value="0")
-        Field(vrow, textvariable=self.val_var, width=90).grid(
-            row=0, column=1, sticky="w", padx=4)
-        PrimaryButton(vrow, "Set selected",
-                      command=lambda: self.set_found_async(False),
-                      width=110).grid(row=0, column=2, padx=4)
-        GhostButton(vrow, "Set + lock",
-                    command=lambda: self.set_found_async(True),
-                    width=110).grid(row=0, column=3, padx=4)
-        GhostButton(vrow, "Clear all locks", command=self.clear_locks_async,
-                    width=130).grid(row=0, column=4, padx=4)
+        Field(row, textvariable=self.val_var, width=90).pack(side="left")
+        PrimaryButton(row, "Set selected", width=110,
+                      command=lambda: self.set_found_async(False)).pack(
+            side="left", padx=(T.PAD_M, 0))
+        GhostButton(row, "Set + lock", width=110,
+                    command=lambda: self.set_found_async(True)).pack(
+            side="left", padx=(T.PAD_S, 0))
+        QuietButton(row, "Clear all locks", width=120,
+                    command=self.clear_locks_async).pack(
+            side="left", padx=(T.PAD_S, 0))
 
     # -- actions ------------------------------------------------------
 
@@ -124,13 +130,16 @@ class StatSearchTab(BaseTab):
             self.after(0, lambda: self.app.set_status(err))
 
     def _apply_search(self, rows, res, quiet):
-        self.flist.delete(0, tk.END)
         self.f_rows = []
+        labels = []
         for si, label, kind, name, value in rows:
             self.f_rows.append((si, kind, name))
-            self.flist.insert(tk.END, f"{label}.{name} [{kind}] = {value}")
+            labels.append(f"{label}.{name} [{kind}] = {value}")
+        self.panel.set_rows(labels)
+        self.panel.set_empty("No field matches this filter.")
         if not quiet:
-            self.app.set_status(f"{res} row(s) (max {MAX_ROWS} - narrow the filter for more).")
+            self.app.set_status(
+                f"{res} row(s) (max {MAX_ROWS} - narrow the filter for more).")
 
     def set_found_async(self, lock):
         client = require_client(self.app)
@@ -149,7 +158,8 @@ class StatSearchTab(BaseTab):
         si, kind, name = self.f_rows[sel[0]]
         tgt = self.app.target()
         lock_s = "1" if lock else "0"
-        run_async(self, lambda: self._do_set(client, tgt, si, kind, name, v, lock_s))
+        run_async(self, lambda: self._do_set(client, tgt, si, kind, name, v,
+                                             lock_s))
 
     def _do_set(self, client, tgt, si, kind, name, v, lock_s):
         try:
@@ -160,7 +170,8 @@ class StatSearchTab(BaseTab):
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
-        self._do_search(client, tgt, self.filter_var.get().strip(), quiet=True)
+        self._do_search(client, tgt, self.filter_var.get().strip(),
+                        quiet=True)
 
     def clear_locks_async(self):
         client = require_client(self.app)

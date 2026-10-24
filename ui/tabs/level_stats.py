@@ -1,14 +1,12 @@
-"""Level & Stats tab: level, vocation EXP, favorability, base stat values."""
-import tkinter as tk
+"""Level & Stats: level, vocation EXP, favorability, base stat values."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    run_async, require_client,
-    Card, card_content, H1, H2, Muted,
-    PrimaryButton, GhostButton, Field, StyledListbox,
+    Section, PageHeader, Row, ListPanel, Field, PrimaryButton, GhostButton,
+    QuietButton, run_async, require_client,
 )
 
 
@@ -21,70 +19,86 @@ class LevelStatsTab(BaseTab):
         self.grid_rowconfigure(3, weight=1)
         app.register_refreshable(self)
 
-        H1(self, "Level & Stats", row=0, column=0, sticky="w", pady=(0, 8))
+        PageHeader(
+            self, "Level & Stats",
+            "Level, vocation EXP and the base values the game calculates "
+            "everything else from.").grid(row=0, column=0, sticky="ew",
+                                          pady=(0, T.PAD_L))
 
-        # level card
-        lvl_card = Card(self, row=1, column=0, sticky="ew", padx=4, pady=6)
-        lrow = card_content(lvl_card)
-        ctk.CTkLabel(lrow, text="Level:", text_color=T.TEXT).grid(
-            row=0, column=0, sticky="w")
+        level = Section(self, "Level & EXP", **{"row": 1, "column": 0,
+                                               "sticky": "ew",
+                                               "pady": (0, T.PAD_M)})
+        body = level.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(row, text="Level", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.level_var = ctk.StringVar(value="1")
-        Field(lrow, textvariable=self.level_var, width=70).grid(
-            row=0, column=1, sticky="w", padx=4)
-        GhostButton(lrow, "Read", command=self.read_level_async,
-                    width=70).grid(row=0, column=2, padx=4)
-        PrimaryButton(lrow, "Apply", command=self.apply_level_async,
-                      width=70).grid(row=0, column=3, padx=4)
-        ctk.CTkLabel(lrow, text="Vocation EXP:", text_color=T.TEXT).grid(
-            row=0, column=4, sticky="w", padx=(24, 0))
+        Field(row, textvariable=self.level_var, width=64).pack(side="left")
+        QuietButton(row, "Read", width=64,
+                    command=self.read_level_async).pack(side="left",
+                                                        padx=(T.PAD_S, 0))
+        PrimaryButton(row, "Apply", width=80,
+                      command=self.apply_level_async).pack(side="left",
+                                                           padx=(T.PAD_S, 0))
+        ctk.CTkLabel(row, text="Vocation EXP",
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED).pack(
+            side="left", padx=(T.PAD_XL, T.PAD_S))
         self.exp_var = ctk.StringVar(value="10000")
-        Field(lrow, textvariable=self.exp_var, width=80).grid(
-            row=0, column=5, sticky="w", padx=4)
-        PrimaryButton(lrow, "Add to current vocation", command=self.add_exp_async,
-                      width=180).grid(row=0, column=6, padx=4)
+        Field(row, textvariable=self.exp_var, width=88).pack(side="left")
+        GhostButton(row, "Add to current vocation", width=170,
+                    command=self.add_exp_async).pack(side="left",
+                                                     padx=(T.PAD_S, 0))
 
-        # favorability card (pawn only - the lua hardcodes the pawn target)
-        fav_card = Card(self, row=2, column=0, sticky="ew", padx=4, pady=6)
-        frow = card_content(fav_card)
-        ctk.CTkLabel(frow, text="Favorability (main pawn only):",
-                     text_color=T.TEXT).grid(row=0, column=0, sticky="w")
+        fav = Section(self, "Favorability",
+                      hint="Main pawn only - the bridge targets the pawn.",
+                      **{"row": 2, "column": 0, "sticky": "ew",
+                         "pady": (0, T.PAD_M)})
+        body = fav.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
         self.fav_var = ctk.StringVar(value="0")
-        Field(frow, textvariable=self.fav_var, width=80).grid(
-            row=0, column=1, sticky="w", padx=4)
-        GhostButton(frow, "Read", command=self.read_fav_async,
-                    width=70).grid(row=0, column=2, padx=4)
-        PrimaryButton(frow, "Apply", command=self.apply_fav_async,
-                      width=70).grid(row=0, column=3, padx=4)
+        Field(row, textvariable=self.fav_var, width=80).pack(side="left")
+        QuietButton(row, "Read", width=64,
+                    command=self.read_fav_async).pack(side="left",
+                                                      padx=(T.PAD_S, 0))
+        PrimaryButton(row, "Apply", width=80,
+                      command=self.apply_fav_async).pack(side="left",
+                                                         padx=(T.PAD_S, 0))
 
-        # base stats card
-        stat_card = Card(self, row=3, column=0, sticky="nsew", padx=4, pady=6)
-        brow = card_content(stat_card)
-        brow.grid_columnconfigure(0, weight=1)
-        brow.grid_rowconfigure(1, weight=1)
-        H2(brow, "Base stats", row=0, column=0, columnspan=3, sticky="w")
-        Muted(brow, "Game recalculates totals from these; Set + lock re-applies every frame.",
-              row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
-        self.clist = StyledListbox(brow)
-        self.clist.grid(row=2, column=0, sticky="nsew")
-        sb = tk.Scrollbar(brow, orient="vertical", command=self.clist.yview)
-        sb.grid(row=2, column=1, sticky="ns")
-        self.clist.config(yscrollcommand=sb.set)
+        stats = Section(self, "Base stats",
+                        hint="The game recalculates totals from these; Set + "
+                             "lock re-applies the value every frame.",
+                        **{"row": 3, "column": 0, "sticky": "nsew"})
+        body = stats.body
+        body.grid_rowconfigure(0, weight=1)
+        self.panel = ListPanel(body, height=9,
+                               empty="Read the character's base values.")
+        self.panel.grid(row=0, column=0, sticky="nsew", padx=(0, T.PAD_M))
+        self.clist = self.panel.listbox
 
-        scol = ctk.CTkFrame(brow, fg_color="transparent")
-        scol.grid(row=2, column=2, sticky="ns", padx=(8, 0))
-        GhostButton(scol, "Read", command=self.read_stats_async,
-                    width=170).pack(pady=3)
-        ctk.CTkLabel(scol, text="New value:", text_color=T.TEXT).pack(pady=(8, 2), anchor="w")
+        controls = ctk.CTkFrame(body, fg_color="transparent", width=1, height=1)
+        controls.grid(row=0, column=1, sticky="ns")
+        controls.grid_columnconfigure(0, weight=1)
+        GhostButton(controls, "Read", width=160,
+                    command=self.read_stats_async).grid(row=0, column=0,
+                                                        sticky="ew")
+        ctk.CTkLabel(controls, text="New value",
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED,
+                     anchor="w").grid(row=1, column=0, sticky="w",
+                                      pady=(T.PAD_M, 2))
         self.val_var = ctk.StringVar(value="0")
-        Field(scol, textvariable=self.val_var, width=170).pack(pady=3)
-        PrimaryButton(scol, "Set selected",
-                      command=lambda: self.set_stat_async(False),
-                      width=170).pack(pady=3)
-        GhostButton(scol, "Set + lock",
-                    command=lambda: self.set_stat_async(True),
-                    width=170).pack(pady=3)
-        GhostButton(scol, "Clear all locks", command=self.clear_locks_async,
-                    width=170).pack(pady=3)
+        Field(controls, textvariable=self.val_var, width=160).grid(
+            row=2, column=0, sticky="ew")
+        PrimaryButton(controls, "Set selected", width=160,
+                      command=lambda: self.set_stat_async(False)).grid(
+            row=3, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        QuietButton(controls, "Set + lock", width=160,
+                    command=lambda: self.set_stat_async(True)).grid(
+            row=4, column=0, sticky="ew", pady=(T.PAD_XS, 0))
+        QuietButton(controls, "Clear all locks", width=160,
+                    command=self.clear_locks_async).grid(
+            row=5, column=0, sticky="ew", pady=(T.PAD_XS, 0))
 
     # -- level ----------------------------------------------------------
 
@@ -105,15 +119,12 @@ class LevelStatsTab(BaseTab):
     def _do_read_level(self, client, tgt):
         try:
             res = client.send("get_info", tgt, timeout=15)
-            # "job,level,..." - CE table parses ^([^,]*),(.*)$
+            # "job,level,..."
             parts = res.split(",", 1)
             job_s = parts[0] if parts else "?"
             lvl_s = parts[1].split(",")[0] if len(parts) > 1 else "?"
-            try:
-                int(lvl_s)
+            if lvl_s.isdigit():
                 self.after(0, lambda: self.level_var.set(lvl_s))
-            except ValueError:
-                pass
             self.after(0, lambda: self.app.set_status(
                 f"Vocation {job_s}, level {lvl_s}"))
         except (BridgeError, BridgeTimeout) as e:
@@ -153,10 +164,11 @@ class LevelStatsTab(BaseTab):
     def _do_read_fav(self, client):
         try:
             res = client.send("get_fav", timeout=15)  # no args; pawn only
-            self.after(0, lambda: (
-                self.fav_var.set(res.strip()),
-                self.app.set_status("Favorability read."),
-            ))
+
+            def _ui():
+                self.fav_var.set(res.strip())
+                self.app.set_status("Favorability read.")
+            self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -169,7 +181,7 @@ class LevelStatsTab(BaseTab):
         if v is None:
             return
         run_async(self, lambda: self._do_simple(
-            client, "set_fav", (v,), "Favorability applied."))  # no target arg
+            client, "set_fav", (v,), "Favorability applied."))
 
     # -- base stats -------------------------------------------------------
 
@@ -198,11 +210,13 @@ class LevelStatsTab(BaseTab):
 
     def _apply_stats(self, rows, quiet):
         keep = self.clist.curselection()
-        self.clist.delete(0, tk.END)
         self.c_rows = []
+        labels = []
         for gi, title, field, label, value in rows:
             self.c_rows.append((gi, field))
-            self.clist.insert(tk.END, f"[{title}] {label} = {value}")
+            labels.append(f"[{title}] {label} = {value}")
+        self.panel.set_rows(labels)
+        self.panel.set_empty("No base values reported.")
         if keep and keep[0] < len(self.c_rows):
             self.clist.selection_set(keep[0])
         if not quiet:
@@ -222,7 +236,8 @@ class LevelStatsTab(BaseTab):
         gi, field = self.c_rows[sel[0]]
         tgt = self.app.target()
         lock_s = "1" if lock else "0"
-        run_async(self, lambda: self._do_set_stat(client, tgt, gi, field, v, lock_s))
+        run_async(self, lambda: self._do_set_stat(client, tgt, gi, field, v,
+                                                  lock_s))
 
     def _do_set_stat(self, client, tgt, gi, field, v, lock_s):
         try:

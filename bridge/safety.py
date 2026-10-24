@@ -126,8 +126,13 @@ def find_save_remote_dirs():
             continue
         for acct in accounts:
             remote = os.path.join(userdata, acct, APP_ID, "remote")
-            if os.path.isdir(remote) and os.listdir(remote):
-                found.append(remote)
+            try:
+                if os.path.isdir(remote) and os.listdir(remote):
+                    found.append(remote)
+            except OSError:
+                # A locked or half-created account folder must not hide the
+                # other accounts' saves.
+                continue
     # Most recently modified first: that is the account actually playing.
     found.sort(key=lambda p: _newest_mtime(p), reverse=True)
     return found
@@ -180,7 +185,13 @@ def backup_saves(remote=None):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     account = _remote_account(remote)
     dest = _unique(os.path.join(backups_dir(), f"{stamp}-{account}"))
-    shutil.copytree(remote, dest)
+    try:
+        shutil.copytree(remote, dest)
+    except Exception:
+        # Never leave a half-copied folder behind: it would look like a
+        # restorable backup.
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     if not any(os.path.basename(p).startswith("pinned-")
                for p in list_backups()):
         pinned = _unique(os.path.join(

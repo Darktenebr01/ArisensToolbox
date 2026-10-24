@@ -1,13 +1,12 @@
-"""Pawn tab: rating (thumbs-up / hearts) and badge progress for the selected pawn."""
-import tkinter as tk
+"""Rating & Badges: pawn rating (thumbs-up / hearts) and badge progress."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
-    Field, StyledListbox, run_async, require_client, show_probe,
+    Section, PageHeader, Row, ListPanel, Field, PrimaryButton, GhostButton,
+    QuietButton, caption, dev_only, run_async, require_client, show_probe,
 )
 
 
@@ -19,64 +18,73 @@ class PawnTab(BaseTab):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
 
-        H1(self, "Rating & Badges", row=0, column=0, sticky="w", pady=(0, 10))
+        header = PageHeader(
+            self, "Rating & Badges",
+            "Edit the pawn picked in the pawn selector above.")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
+        header.action(GhostButton(header.actions, "Refresh", width=96,
+                                  command=self.refresh))
 
-        # rating card
-        card = Card(self, row=1, column=0, sticky="ew", padx=4, pady=6)
-        cc = card_content(card)
-        H2(cc, "Rating", row=0, column=0, sticky="w", pady=(0, 6))
-        Muted(cc, "Edits the pawn chosen in the Pawn box at the top.",
-              row=1, column=0, sticky="w", pady=(0, 6))
-        inner = ctk.CTkFrame(cc, fg_color="transparent")
-        inner.grid(row=2, column=0, sticky="w")
-        ctk.CTkLabel(inner, **T.body("Thumbs up:")).pack(side="left")
+        rating = Section(self, "Rating", **{"row": 1, "column": 0,
+                                            "sticky": "ew",
+                                            "pady": (0, T.PAD_M)})
+        body = rating.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(row, text="Thumbs up", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.good_var = ctk.StringVar(value="0")
-        Field(inner, textvariable=self.good_var, width=80).pack(side="left", padx=(4, 16))
-        ctk.CTkLabel(inner, **T.body("Hearts:")).pack(side="left")
+        Field(row, textvariable=self.good_var, width=80).pack(side="left")
+        ctk.CTkLabel(row, text="Hearts", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left",
+                                              padx=(T.PAD_L, T.PAD_S))
         self.like_var = ctk.StringVar(value="0")
-        Field(inner, textvariable=self.like_var, width=80).pack(side="left", padx=(4, 16))
-        GhostButton(inner, text="Read", width=80,
-                    command=self.read_rating_async).pack(side="left", padx=4)
-        PrimaryButton(inner, text="Apply", width=80,
-                      command=self.apply_rating_async).pack(side="left", padx=4)
+        Field(row, textvariable=self.like_var, width=80).pack(side="left")
+        QuietButton(row, "Read", width=70,
+                    command=self.read_rating_async).pack(side="left",
+                                                         padx=(T.PAD_L, 0))
+        PrimaryButton(row, "Apply", width=90,
+                      command=self.apply_rating_async).pack(side="left",
+                                                            padx=(T.PAD_S, 0))
 
-        # badges card
-        card = Card(self, row=2, column=0, sticky="nsew", padx=4, pady=6)
-        cc = card_content(card)
-        cc.grid_rowconfigure(1, weight=1)
-        H2(cc, "Badge progress (the x in x/30)",
-           row=0, column=0, sticky="w", pady=(0, 6))
-        self.badge_list = StyledListbox(cc)
-        self.badge_list.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
-        sb = tk.Scrollbar(cc, orient="vertical", command=self.badge_list.yview)
-        sb.grid(row=1, column=1, sticky="ns")
-        self.badge_list.config(yscrollcommand=sb.set)
+        badges = Section(self, "Badge progress",
+                         hint="The x in x/30. Select a badge to change it.",
+                         **{"row": 2, "column": 0, "sticky": "nsew"})
+        body = badges.body
+        body.grid_rowconfigure(0, weight=1)
+        self.panel = ListPanel(body, height=10,
+                               empty="Read the badges of this pawn.")
+        self.panel.grid(row=0, column=0, sticky="nsew")
+        self.badge_list = self.panel.listbox
 
-        brow = ctk.CTkFrame(cc, fg_color="transparent")
-        brow.grid(row=2, column=0, sticky="ew", pady=(0, 4))
-        GhostButton(brow, text="Read badges", width=110,
-                    command=self.read_badges_async).pack(side="left", padx=(0, 12))
-        ctk.CTkLabel(brow, **T.body("New value:")).pack(side="left")
+        row = Row(body)
+        row.grid(row=1, column=0, sticky="ew", pady=(T.PAD_M, 0))
+        row.add(QuietButton(row, "Read badges", width=110,
+                            command=self.read_badges_async))
+        ctk.CTkLabel(row, text="New value",
+                     font=T.font(T.SIZE_SMALL), text_color=T.MUTED).pack(
+            side="left", padx=(T.PAD_S, T.PAD_S))
         self.val_var = ctk.StringVar(value="30")
-        Field(brow, textvariable=self.val_var, width=60).pack(side="left", padx=(4, 12))
-        PrimaryButton(brow, text="Set selected", width=110,
-                      command=self.set_badge_async).pack(side="left", padx=4)
-        GhostButton(brow, text="Fill ALL to quota", width=140,
-                    command=self.fill_badges_async).pack(side="left", padx=4)
+        Field(row, textvariable=self.val_var, width=64).pack(side="left")
+        row.add(PrimaryButton(row, "Set selected", width=116,
+                              command=self.set_badge_async), gap=T.PAD_S)
+        row.add(GhostButton(row, "Grant selected", width=116,
+                            command=self.grant_badge_async))
+        row.add(GhostButton(row, "Fill all to quota", width=128,
+                            command=self.fill_badges_async))
+        dev_only(self, lambda: QuietButton(row, "Probe data", width=100,
+                                          command=self.probe_badges_async).pack(
+            side="left"))
+        dev_only(self, lambda: QuietButton(row, "Probe names", width=104,
+                                          command=self.probe_badge_names_async).pack(
+            side="left"))
+        caption(body, "Fills are bulk edits and write to your save; the "
+                      "automatic backup runs before the first change.",
+                row=2, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
-        brow2 = ctk.CTkFrame(cc, fg_color="transparent")
-        brow2.grid(row=3, column=0, sticky="w")
-        GhostButton(brow2, text="Grant selected badge", width=170,
-                    command=self.grant_badge_async).pack(side="left")
-        dev_only(self, lambda: GhostButton(brow2, text="Probe badge data", width=150,
-                    command=self.probe_badges_async).pack(side="left", padx=8))
-        dev_only(self, lambda: GhostButton(brow2, text="Probe badge names", width=160,
-                    command=self.probe_badge_names_async).pack(side="left"))
-
-    # -- refresh (called by the app after pawn picker changes) ----------
+    # -- refresh (called by the app after the pawn picker changes) ------
 
     def refresh(self):
-        """Re-read rating + badges for the newly selected pawn."""
         self.read_rating_async()
         self.read_badges_async()
 
@@ -95,9 +103,12 @@ class PawnTab(BaseTab):
             if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
                 raise BridgeError(f"unexpected response: {res}")
             g, l = (p.strip() for p in parts)
-            self.after(0, lambda: (
-                self.good_var.set(g), self.like_var.set(l),
-                self.app.set_status("Rating read.")))
+
+            def _ui():
+                self.good_var.set(g)
+                self.like_var.set(l)
+                self.app.set_status("Rating read.")
+            self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -118,7 +129,8 @@ class PawnTab(BaseTab):
             prev = None
             try:
                 parts = (client.send("get_rating") or "").split(",")
-                if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
+                if len(parts) == 2 and all(p.strip().isdigit()
+                                          for p in parts):
                     prev = tuple(int(p.strip()) for p in parts)
             except (BridgeError, BridgeTimeout):
                 pass
@@ -137,8 +149,6 @@ class PawnTab(BaseTab):
 
     # Confirmed in-game badge names (PB number -> name). Only add mappings
     # proven by the darken test or certain by quota; never guess.
-    # 2026-10-11: user darken-tested PB020/021/025/026/027/040/041; the rest
-    # deduced from screenshot grid order (grid slot n = PB(n+16)) + quota match.
     BADGE_NAMES = {
         20: "Cyclops Clobberer",
         21: "Ogre Eliminator",
@@ -193,14 +203,14 @@ class PawnTab(BaseTab):
                 if len(parts) == 4 and parts[0].strip().isdigit():
                     n, cur, quota, _name = (p.strip() for p in parts)
                     badges.append((int(n), int(cur)))
-                    shown = self.BADGE_NAMES.get(int(n), self._badge_kind(quota))
-                    labels.append(
-                        f"PB{int(n):03d}  {shown}   {cur} / {quota}")
+                    shown = self.BADGE_NAMES.get(int(n),
+                                                 self._badge_kind(quota))
+                    labels.append(f"PB{int(n):03d}   {shown}   {cur} / {quota}")
             self.badges = badges
+
             def _ui():
-                self.badge_list.delete(0, tk.END)
-                for lbl in labels:
-                    self.badge_list.insert(tk.END, lbl)
+                self.panel.set_rows(labels)
+                self.panel.set_empty("No badges reported for this pawn.")
                 self.app.set_status(f"Read {len(badges)} badges.")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
@@ -235,9 +245,8 @@ class PawnTab(BaseTab):
                 self.app.record_undo(
                     f"PB{n:03d} = {prev}",
                     lambda c, nn=n, pp=prev: c.send("set_badge", nn, pp))
-            self.after(0, lambda: (
-                self.app.set_status(f"PB{n:03d} = {v}"),
-                self.read_badges_async()))
+            self.after(0, lambda: (self.app.set_status(f"PB{n:03d} = {v}"),
+                                   self.read_badges_async()))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -265,9 +274,8 @@ class PawnTab(BaseTab):
                         c.send("set_badge", nn, cur)
                     return f"restored {len(snap)} badges"
                 self.app.record_undo("fill badges", _undo)
-            self.after(0, lambda: (
-                self.app.set_status(f"Filled {res} badges."),
-                self.read_badges_async()))
+            self.after(0, lambda: (self.app.set_status(f"Filled {res} badges."),
+                                   self.read_badges_async()))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -311,8 +319,8 @@ class PawnTab(BaseTab):
         try:
             res = client.send("badge_probe3", timeout=30)
             self.after(0, lambda: (
-                self.app.set_status("Badge name probe done - full output in the popup."),
-                show_probe(self, "Badge name probe - copy all of it", res)))
+                self.app.set_status("Badge name probe done."),
+                show_probe(self, "Badge name probe", res)))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -321,8 +329,8 @@ class PawnTab(BaseTab):
         try:
             res = client.send("badge_probe", timeout=30)
             self.after(0, lambda: (
-                self.app.set_status("Badge probe done - full output in the popup."),
-                show_probe(self, "Badge probe - copy all of it", res)))
+                self.app.set_status("Badge probe done."),
+                show_probe(self, "Badge probe", res)))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

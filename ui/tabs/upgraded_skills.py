@@ -1,13 +1,12 @@
-"""Upgraded Skills tab: write JobNN_ExSkill1..5 into the equipped weapon's special-skill slots."""
+"""Upgraded Skills: write JobNN_ExSkill1..5 into the equipped weapon."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
+    Section, PageHeader, Row, Switch, PrimaryButton, GhostButton, caption,
     run_async, require_client,
-    Card, card_content, H1, Muted,
-    PrimaryButton, GhostButton, Check,
 )
 
 
@@ -18,44 +17,49 @@ class UpgradedSkillsTab(BaseTab):
         self.grid_columnconfigure(0, weight=1)
         app.register_refreshable(self)
 
-        H1(self, "Upgraded Skills", row=0, column=0, sticky="w", pady=(0, 8))
-        Muted(self, "Upgraded weapon skills (Shearing Wind, Fanged Rupture, Detonate and Dash...) "
-                    "are item special skills: JobNN_ExSkill1..5.",
-              row=1, column=0, sticky="w")
-        Muted(self, "Pick up to 4. They are written into the special-skill slots of the target's "
-                    "EQUIPPED weapon(s) (target + vocation = top bar).",
-              row=2, column=0, sticky="w", pady=(0, 8))
+        PageHeader(
+            self, "Upgraded Skills",
+            "Upgraded weapon skills (Shearing Wind, Fanged Rupture, Detonate) "
+            "are item special skills: JobNN_ExSkill1-5.").grid(
+                row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
 
-        slots_card = Card(self, row=3, column=0, sticky="ew", padx=4, pady=6)
-        slots = card_content(slots_card)
+        picks = Section(
+            self, "Pick up to four",
+            hint="Slots are written into the special-skill slots of the "
+                 "target's equipped weapon. Apply, then open the in-game "
+                 "skill menu to see which upgrade each slot is.",
+            **{"row": 1, "column": 0, "sticky": "ew", "pady": (0, T.PAD_M)})
+        body = picks.body
         self.check_vars = []
         for k in range(1, 6):
-            v = ctk.BooleanVar(value=k <= 3)
-            self.check_vars.append(v)
-            Check(slots,
-                  f"ExSkill {k}  (which upgrade it is: apply it and look at the in-game skill menu)",
-                  variable=v).grid(row=k - 1, column=0, sticky="w", pady=3)
+            var = ctk.BooleanVar(value=k <= 3)
+            self.check_vars.append(var)
+            Switch(body, text=f"ExSkill {k}", variable=var).grid(
+                row=k - 1, column=0, sticky="w", pady=T.PAD_XS)
 
-        apply_card = Card(self, row=4, column=0, sticky="ew", padx=4, pady=6)
-        apl = card_content(apply_card)
-        PrimaryButton(apl, "Apply to equipped weapon(s)", command=self.apply_async,
-                      width=220).grid(row=0, column=0, sticky="w")
-        GhostButton(apl, "Undo last apply", command=self.undo_async,
-                    width=140).grid(row=0, column=1, sticky="w", padx=(8, 0))
-
+        apply_card = Section(self, "Apply", **{"row": 2, "column": 0,
+                                              "sticky": "ew"})
+        body = apply_card.body
+        row = Row(body)
+        row.grid(row=0, column=0, sticky="w")
+        row.add(PrimaryButton(row, "Apply to equipped weapon", width=200,
+                              command=self.apply_async))
+        row.add(GhostButton(row, "Undo last apply", width=140,
+                            command=self.undo_async))
         self.note_var = ctk.StringVar(value="")
-        ctk.CTkLabel(apl, textvariable=self.note_var, text_color=T.MUTED,
-                     wraplength=700, justify="left").grid(row=1, column=0, columnspan=2,
-                                                          sticky="w", pady=(8, 0))
-        Muted(apl, "This overwrites the weapon's current special skills "
-                   "(Undo restores them while the game stays open).",
-              row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        Muted(apl, "Equip the weapon you want first. Vocation in the top bar must match "
-                   "the equipped weapon's vocation.",
-              row=3, column=0, columnspan=2, sticky="w")
+        ctk.CTkLabel(body, textvariable=self.note_var,
+                     font=T.font(T.SIZE_BODY), text_color=T.TEXT,
+                     anchor="w", justify="left", wraplength=700).grid(
+            row=1, column=0, sticky="ew", pady=(T.PAD_M, 0))
+        caption(body, "This overwrites the weapon's current special skills. "
+                      "Undo restores them while the game stays open. Equip "
+                      "the weapon first and match the vocation in the top "
+                      "bar.",
+                row=2, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
     def _picked(self):
-        return ",".join(str(k + 1) for k, v in enumerate(self.check_vars) if v.get())
+        return ",".join(str(k + 1) for k, v in enumerate(self.check_vars)
+                        if v.get())
 
     def apply_async(self):
         client = require_client(self.app)
@@ -63,7 +67,7 @@ class UpgradedSkillsTab(BaseTab):
             return
         picks = self._picked()
         if not picks:
-            self.app.set_status("Tick at least one ExSkill.")
+            self.app.set_status("Pick at least one ExSkill.")
             return
         tgt, job = self.app.target(), self.app.job()
         run_async(self, lambda: self._do_apply(client, tgt, job, picks))
@@ -71,11 +75,13 @@ class UpgradedSkillsTab(BaseTab):
     def _do_apply(self, client, tgt, job, picks):
         try:
             res = client.send("exskill_equip", tgt, job, picks, timeout=30)
-            self.after(0, lambda: (
-                self.app.set_status(f"Applied: {res}"),
-                self.note_var.set("Applied. Re-open the skill menu in game "
-                                   "(or unequip/re-equip the weapon) to see the change."),
-            ))
+
+            def _ui():
+                self.app.set_status(f"Applied: {res}")
+                self.note_var.set(
+                    "Applied. Re-open the skill menu in game (or unequip and "
+                    "re-equip the weapon) to see the change.")
+            self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -90,10 +96,11 @@ class UpgradedSkillsTab(BaseTab):
     def _do_undo(self, client, tgt):
         try:
             res = client.send("exskill_undo", tgt, timeout=30)
-            self.after(0, lambda: (
-                self.app.set_status(f"Undone: {res}"),
-                self.note_var.set(""),
-            ))
+
+            def _ui():
+                self.app.set_status(f"Undone: {res}")
+                self.note_var.set("")
+            self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

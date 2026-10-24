@@ -1,19 +1,18 @@
-"""Names tab: rename the Arisen, the main pawn and hired pawns."""
-import tkinter as tk
+"""Names: rename the Arisen, the main pawn and hired pawns."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, H2, Muted, PrimaryButton, GhostButton, dev_only,
-    Field, StyledListbox, run_async, require_client, show_probe,
+    Section, PageHeader, Row, ListPanel, Field, PrimaryButton, GhostButton,
+    QuietButton, caption, dev_only, run_async, require_client, show_probe,
 )
 
 
 def _clean_name(s):
-    # '|' is the protocol separator; keep names protocol-safe.
-    # The game caps names at 12 chars and rejects < >.
+    # '|' is the protocol separator; the game caps names at 12 chars and
+    # rejects < >.
     s = "".join(ch for ch in (s or "") if ch not in "|\r\n<>").strip()
     return s[:12]
 
@@ -24,69 +23,73 @@ class NamesTab(BaseTab):
         self.app = app
         self.hired_indices = []  # listbox row -> PW.list index
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
-        H1(self, "Names", row=0, column=0, sticky="w", pady=(0, 4))
-        Muted(self, "Rename the Arisen, your main pawn and hired pawns. "
-                    "Renames apply immediately; save the game and reload to keep them.",
-              row=1, column=0, sticky="w", pady=(0, 8))
+        header = PageHeader(
+            self, "Names",
+            "Rename the Arisen, the main pawn and hired pawns. Names apply "
+            "immediately; save and reload to keep them.")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
+        header.action(GhostButton(header.actions, "Refresh all", width=110,
+                                  command=self.refresh_async))
+        dev_only(self, lambda: header.action(QuietButton(
+            header.actions, "Diagnose", width=100,
+            command=self.diagnose_async)))
 
-        brow = ctk.CTkFrame(self, fg_color="transparent")
-        brow.grid(row=2, column=0, sticky="w", pady=(0, 4))
-        GhostButton(brow, text="Refresh all", width=110,
-                    command=self.refresh_async).pack(side="left")
-        dev_only(self, lambda: GhostButton(brow, text="Diagnose", width=110,
-                    command=self.diagnose_async).pack(side="left", padx=(8, 0)))
+        duo = ctk.CTkFrame(self, fg_color="transparent", width=1, height=1)
+        duo.grid(row=1, column=0, sticky="ew", pady=(0, T.PAD_M))
+        duo.grid_columnconfigure(0, weight=1)
+        duo.grid_columnconfigure(1, weight=1)
 
-        # Arisen card
-        card = Card(self, row=3, column=0, sticky="ew", padx=4, pady=6)
-        cc = card_content(card)
-        H2(cc, "Arisen (you)", row=0, column=0, sticky="w", pady=(0, 6))
-        arow = ctk.CTkFrame(cc, fg_color="transparent")
-        arow.grid(row=1, column=0, sticky="ew")
-        ctk.CTkLabel(arow, **T.body("Current:")).pack(side="left")
-        self.arisen_cur = ctk.CTkLabel(arow, text="—",
-                                       font=(T.FONT_FAMILY, 13, "bold"),
-                                       text_color=T.ACCENT)
-        self.arisen_cur.pack(side="left", padx=(6, 16))
+        arisen = Section(duo, "Arisen", **{"row": 0, "column": 0,
+                                           "sticky": "nsew",
+                                           "padx": (0, T.PAD_M)})
+        body = arisen.body
+        self.arisen_cur = ctk.CTkLabel(body, text="—",
+                                       font=T.font(T.SIZE_TITLE, "bold"),
+                                       text_color=T.TEXT, anchor="w")
+        self.arisen_cur.grid(row=0, column=0, sticky="w")
+        row = Row(body)
+        row.grid(row=1, column=0, sticky="ew", pady=(T.PAD_M, 0))
         self.arisen_var = ctk.StringVar()
-        Field(arow, textvariable=self.arisen_var, width=180).pack(side="left", padx=(0, 8))
-        PrimaryButton(arow, text="Rename", width=80,
-                      command=self.rename_arisen_async).pack(side="left", padx=4)
+        Field(row, textvariable=self.arisen_var, width=180).pack(side="left")
+        PrimaryButton(row, "Rename", width=92,
+                      command=self.rename_arisen_async).pack(side="left",
+                                                             padx=(T.PAD_S, 0))
 
-        # Main pawn card
-        card = Card(self, row=4, column=0, sticky="ew", padx=4, pady=6)
-        cc = card_content(card)
-        H2(cc, "Main pawn", row=0, column=0, sticky="w", pady=(0, 6))
-        mrow = ctk.CTkFrame(cc, fg_color="transparent")
-        mrow.grid(row=1, column=0, sticky="ew")
-        ctk.CTkLabel(mrow, **T.body("Current:")).pack(side="left")
-        self.main_cur = ctk.CTkLabel(mrow, text="—",
-                                     font=(T.FONT_FAMILY, 13, "bold"),
-                                     text_color=T.ACCENT)
-        self.main_cur.pack(side="left", padx=(6, 16))
+        main = Section(duo, "Main pawn", **{"row": 0, "column": 1,
+                                            "sticky": "nsew"})
+        body = main.body
+        self.main_cur = ctk.CTkLabel(body, text="—",
+                                     font=T.font(T.SIZE_TITLE, "bold"),
+                                     text_color=T.TEXT, anchor="w")
+        self.main_cur.grid(row=0, column=0, sticky="w")
+        row = Row(body)
+        row.grid(row=1, column=0, sticky="ew", pady=(T.PAD_M, 0))
         self.main_var = ctk.StringVar()
-        Field(mrow, textvariable=self.main_var, width=180).pack(side="left", padx=(0, 8))
-        PrimaryButton(mrow, text="Rename", width=80,
-                      command=self.rename_main_async).pack(side="left", padx=4)
+        Field(row, textvariable=self.main_var, width=180).pack(side="left")
+        PrimaryButton(row, "Rename", width=92,
+                      command=self.rename_main_async).pack(side="left",
+                                                           padx=(T.PAD_S, 0))
 
-        # Hired pawns card
-        card = Card(self, row=5, column=0, sticky="nsew", padx=4, pady=6)
-        cc = card_content(card)
-        cc.grid_rowconfigure(1, weight=1)
-        H2(cc, "Hired pawns", row=0, column=0, sticky="w", pady=(0, 6))
-        self.pawn_list = StyledListbox(cc, height=6)
-        self.pawn_list.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
-        sb = tk.Scrollbar(cc, orient="vertical", command=self.pawn_list.yview)
-        sb.grid(row=1, column=1, sticky="ns")
-        self.pawn_list.config(yscrollcommand=sb.set)
-
-        prow = ctk.CTkFrame(cc, fg_color="transparent")
-        prow.grid(row=2, column=0, sticky="ew")
+        hired = Section(self, "Hired pawns", **{"row": 3, "column": 0,
+                                                "sticky": "nsew"})
+        body = hired.body
+        body.grid_rowconfigure(0, weight=1)
+        self.panel = ListPanel(body, height=7,
+                               empty="Refresh to list the pawns in your party.")
+        self.panel.grid(row=0, column=0, sticky="nsew")
+        self.pawn_list = self.panel.listbox
+        row = Row(body)
+        row.grid(row=1, column=0, sticky="ew", pady=(T.PAD_M, 0))
         self.hired_var = ctk.StringVar()
-        Field(prow, textvariable=self.hired_var, width=180).pack(side="left", padx=(0, 8))
-        PrimaryButton(prow, text="Rename selected", width=130,
-                      command=self.rename_hired_async).pack(side="left", padx=4)
+        Field(row, textvariable=self.hired_var, width=200).pack(side="left")
+        PrimaryButton(row, "Rename selected", width=140,
+                      command=self.rename_hired_async).pack(side="left",
+                                                            padx=(T.PAD_S, 0))
+        caption(body, "Hired pawns come and go with your party; refresh "
+                      "after recruiting.",
+                row=2, column=0, sticky="ew", pady=(T.PAD_S, 0))
 
     # -- read ----------------------------------------------------------
 
@@ -110,7 +113,7 @@ class NamesTab(BaseTab):
             text = ("ARISEN\n" + arisen.replace(" // ", "\n") +
                     "\n\nMAIN PAWN\n" + main.replace(" // ", "\n") +
                     "\n\nARISEN NAME HUNT\n" + deep.replace(" // ", "\n"))
-            self.after(0, lambda: show_probe(self, "Name probe - copy all of it", text))
+            self.after(0, lambda: show_probe(self, "Name probe", text))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -134,9 +137,8 @@ class NamesTab(BaseTab):
             def _ui():
                 self.arisen_cur.configure(text=arisen)
                 self.main_cur.configure(text=main)
-                self.pawn_list.delete(0, tk.END)
-                for h in hired:
-                    self.pawn_list.insert(tk.END, h)
+                self.panel.set_rows(hired)
+                self.panel.set_empty("No hired pawns in the party.")
                 self.app.set_status(
                     f"Names refreshed (arisen, main pawn, {len(hired)} hired).")
             self.after(0, _ui)
@@ -154,9 +156,11 @@ class NamesTab(BaseTab):
                 self.app.record_undo(
                     label,
                     lambda c, cc=ucmd, aa=uargs: c.send(cc, *aa, timeout=20))
-            self.after(0, lambda: (
-                self.app.set_status(res),
-                self.refresh_async()))
+
+            def _ui():
+                self.app.set_status(res)
+                self.refresh_async()
+            self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))
@@ -199,4 +203,5 @@ class NamesTab(BaseTab):
         idx = self.hired_indices[sel[0]]
         client = require_client(self.app)
         if client:
-            run_async(self, lambda: self._rename(client, "set_pawn_name", str(idx), name))
+            run_async(self, lambda: self._rename(client, "set_pawn_name",
+                                                 str(idx), name))

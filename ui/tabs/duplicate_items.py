@@ -1,13 +1,13 @@
-"""Duplicate Items tab: copy inventory entries (dup_owners/dup_rows/dup_do/dup_probe)."""
-import tkinter as tk
+"""Duplicate Items: copy inventory entries (dup_owners/dup_rows/dup_do)."""
 import customtkinter as ctk
 
 from bridge.protocol import BridgeError, BridgeTimeout
 from ui.base import BaseTab
 from ui import theme as T
 from ui.widgets import (
-    Card, card_content, H1, Muted, PrimaryButton, GhostButton, dev_only,
-    Field, Combo, Check, StyledListbox, run_async, require_client,
+    Section, PageHeader, Row, ScrollArea, ListPanel, Field, Combo, Check,
+    Switch, PrimaryButton, GhostButton, QuietButton, caption, dev_only,
+    run_async, require_client,
 )
 
 MAX_SHOWN = 500
@@ -21,83 +21,100 @@ class DuplicateItemsTab(BaseTab):
         self.rows = []        # parsed duprows rows
         self.shown = []
         self.sel = None       # selected lua row number
+        self._search_after = None
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        H1(self, "Duplicate Items", row=0, column=0, sticky="w", pady=(0, 10))
+        header = PageHeader(
+            self, "Duplicate Items",
+            "Copy an inventory entry, or double the stack, without "
+            "touching the save by hand.")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, T.PAD_L))
+        header.action(GhostButton(header.actions, "Reload inventory",
+                                  width=140, command=self.load_owners_async))
 
-        # inventory card
-        card = Card(self, row=1, column=0, sticky="ew", padx=4, pady=6)
-        cc = card_content(card)
-        orow = ctk.CTkFrame(cc, fg_color="transparent")
-        orow.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(orow, **T.body("Inventory:")).pack(side="left")
+        self.scroll = ScrollArea(self)
+        self.scroll.grid(row=1, column=0, sticky="nsew")
+
+        filters = Section(self.scroll, "Inventory", **{
+            "row": 0, "column": 0, "sticky": "ew", "pady": (0, T.PAD_M)})
+        body = filters.body
+        top = Row(body)
+        top.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(top, text="Owner", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.owner_var = ctk.StringVar(value="(not loaded)")
-        self.owner_combo = Combo(
-            orow, variable=self.owner_var, values=["(not loaded)"],
-            width=340,
-            command=lambda _: self.load_rows_async(),
-        )
-        self.owner_combo.pack(side="left", padx=8)
-        GhostButton(orow, text="Reload inventory", width=140,
-                    command=self.load_owners_async).pack(side="left")
+        self.owner_combo = Combo(top, variable=self.owner_var,
+                                 values=["(not loaded)"], width=320,
+                                 command=lambda _: self.load_rows_async())
+        self.owner_combo.pack(side="left")
 
-        srow = ctk.CTkFrame(cc, fg_color="transparent")
-        srow.grid(row=1, column=0, sticky="ew")
-        ctk.CTkLabel(srow, **T.body("Search:")).pack(side="left")
+        search = Row(body)
+        search.grid(row=1, column=0, sticky="ew", pady=(T.PAD_S, 0))
+        ctk.CTkLabel(search, text="Search", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.search_var = ctk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self.refresh_list())
-        Field(srow, textvariable=self.search_var, width=220).pack(side="left", padx=8)
+        self.search_var.trace_add("write", lambda *_: self._debounced_refresh())
+        Field(search, textvariable=self.search_var, width=260).pack(side="left")
         self.equip_var = ctk.BooleanVar(value=False)
-        Check(srow, text="Only weapons/armor/jewelry",
-              variable=self.equip_var,
-              command=self.load_rows_async).pack(side="left", padx=8)
+        Check(search, text="Equipment only", variable=self.equip_var,
+              command=self.load_rows_async).pack(side="left",
+                                                 padx=(T.PAD_M, 0))
 
-        # list card
-        card = Card(self, row=2, column=0, sticky="nsew", padx=4, pady=6)
-        cc = card_content(card)
-        cc.grid_rowconfigure(0, weight=1)
-        self.listbox = StyledListbox(cc)
-        self.listbox.grid(row=0, column=0, sticky="nsew")
+        listing = Section(self.scroll, "Items", **{"row": 1, "column": 0,
+                                                   "sticky": "ew",
+                                                   "pady": (0, T.PAD_M)})
+        body = listing.body
+        self.panel = ListPanel(
+            body, height=10, empty="Reload the inventory to list items.")
+        self.panel.grid(row=0, column=0, sticky="nsew")
+        self.listbox = self.panel.listbox
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
-        sb = tk.Scrollbar(cc, orient="vertical", command=self.listbox.yview)
-        sb.grid(row=0, column=1, sticky="ns")
-        self.listbox.config(yscrollcommand=sb.set)
 
-        # duplicate card
-        card = Card(self, row=3, column=0, sticky="ew", padx=4, pady=6)
-        cc = card_content(card)
+        duplicate = Section(self.scroll, "Duplicate", **{"row": 2,
+                                                         "column": 0,
+                                                         "sticky": "ew"})
+        body = duplicate.body
         self.sel_var = ctk.StringVar(value="Click an item to duplicate it.")
-        ctk.CTkLabel(cc, textvariable=self.sel_var,
-                     font=(T.FONT_FAMILY, 11), text_color=T.MUTED).grid(
-            row=0, column=0, sticky="w", pady=(0, 6))
-
-        crow = ctk.CTkFrame(cc, fg_color="transparent")
-        crow.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(crow, **T.body("Copies to add:")).pack(side="left")
+        ctk.CTkLabel(body, textvariable=self.sel_var,
+                     font=T.font(T.SIZE_BODY), text_color=T.TEXT,
+                     anchor="w").grid(row=0, column=0, sticky="ew")
+        controls = Row(body)
+        controls.grid(row=1, column=0, sticky="w", pady=(T.PAD_M, 0))
+        ctk.CTkLabel(controls, text="Copies", font=T.font(T.SIZE_SMALL),
+                     text_color=T.MUTED).pack(side="left", padx=(0, T.PAD_S))
         self.copies_var = ctk.StringVar(value="1")
-        Field(crow, textvariable=self.copies_var, width=70).pack(side="left", padx=(4, 16))
+        Field(controls, textvariable=self.copies_var, width=64).pack(
+            side="left")
         self.store_var = ctk.BooleanVar(value=False)
-        Check(crow, text="Send copies to storage",
-              variable=self.store_var).pack(side="left", padx=8)
+        Switch(controls, text="To storage", variable=self.store_var).pack(
+            side="left", padx=(T.PAD_L, 0))
         self.props_var = ctk.BooleanVar(value=True)
-        Check(crow, text="Copy skills / enhancement / appraisal (equipment)",
-              variable=self.props_var).pack(side="left", padx=8)
+        Switch(controls, text="Copy skills, enhancement and appraisal",
+               variable=self.props_var).pack(side="left",
+                                             padx=(T.PAD_L, 0))
+        row = Row(body)
+        row.grid(row=2, column=0, sticky="w", pady=(T.PAD_M, 0))
+        row.add(PrimaryButton(row, "Duplicate selected", width=160,
+                              command=self.duplicate_async))
+        row.add(GhostButton(row, "Double the stack", width=140,
+                            command=lambda: self._do_dup_async(0)))
+        dev_only(self, lambda: QuietButton(row, "Probe selected", width=120,
+                                          command=self.probe_async).pack(
+            side="left"))
+        caption(body, "New copies go to your inventory, or to storage when "
+                      "ticked. Back up your save first; single-player only.",
+                row=3, column=0, sticky="ew", pady=(T.PAD_M, 0))
 
-        brow = ctk.CTkFrame(cc, fg_color="transparent")
-        brow.grid(row=2, column=0, sticky="w")
-        PrimaryButton(brow, text="Duplicate selected", width=160,
-                      command=self.duplicate_async).pack(side="left", padx=(0, 8))
-        GhostButton(brow, text="Double the stack", width=140,
-                    command=lambda: self._do_dup_async(0)).pack(side="left", padx=8)
-        dev_only(self, lambda: GhostButton(brow, text="Probe selected (writes REFramework log)", width=290,
-                    command=self.probe_async).pack(side="left", padx=8))
+    # -- search -------------------------------------------------------
 
-        Muted(cc, "New copies go to your inventory (or storage if ticked). "
-                  "Equipment copies get the same skills/enhancement when the box is ticked.",
-              row=3, column=0, sticky="w", pady=(8, 0))
-        Muted(cc, "Back up your save first. Single-player only.",
-              row=4, column=0, sticky="w", pady=(2, 0))
+    def _debounced_refresh(self):
+        if self._search_after is not None:
+            try:
+                self.after_cancel(self._search_after)
+            except Exception:
+                pass
+        self._search_after = self.after(140, self.refresh_list)
 
     # -- data loading -------------------------------------------------
 
@@ -119,7 +136,8 @@ class DuplicateItemsTab(BaseTab):
                     idx.append(int(i))
                     labels.append(
                         f"owner {key.strip()} ({count.strip()} items)"
-                        + ("  <- YOU" if isp.strip() == "1" else ""))
+                        + ("  ← you" if isp.strip() == "1" else ""))
+
             def _ui():
                 self.owner_idx = idx
                 if labels:
@@ -140,7 +158,8 @@ class DuplicateItemsTab(BaseTab):
         if not client:
             return
         try:
-            sel = self.owner_combo.cget("values").index(self.owner_var.get())
+            sel = list(self.owner_combo.cget("values")).index(
+                self.owner_var.get())
         except ValueError:
             return
         owner = self.owner_idx[sel]
@@ -164,10 +183,11 @@ class DuplicateItemsTab(BaseTab):
                     })
             self.rows = rows
             self.sel = None
+
             def _ui():
                 self.sel_var.set("Click an item to duplicate it.")
                 self.refresh_list()
-                self.app.set_status(f"{len(rows)} item(s).")
+                self.app.set_status(f"{len(rows)} item(s) (game said {count}).")
             self.after(0, _ui)
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
@@ -177,26 +197,29 @@ class DuplicateItemsTab(BaseTab):
 
     def refresh_list(self):
         tokens = self.search_var.get().lower().split()
-        self.listbox.delete(0, tk.END)
-        self.shown = []
+        shown, rows = [], []
         for r in self.rows:
-            if all(t in r["lname"] or t in r["id"] for t in tokens):
-                if len(self.shown) < MAX_SHOWN:
-                    self.shown.append(r)
-                    self.listbox.insert(
-                        tk.END,
-                        ("[E] " if r["equipped"] else "    ")
-                        + f"{r['name']}   x{r['count']}   (id {r['id']})")
+            if not all(t in r["lname"] or t in r["id"] for t in tokens):
+                continue
+            if len(shown) >= MAX_SHOWN:
+                break
+            shown.append(r)
+            rows.append(("● " if r["equipped"] else "  ")
+                        + f"{r['name']}   ×{r['count']}   (id {r['id']})")
+        self.shown = shown
+        self.panel.set_rows(rows)
+        self.panel.set_empty("No item matches this search." if self.rows
+                             else "Reload the inventory to list items.")
 
     def on_select(self, _event):
         sel = self.listbox.curselection()
         if sel and sel[0] < len(self.shown):
             r = self.shown[sel[0]]
             self.sel = r["i"]
-            note = ("  - ID UNKNOWN, cannot duplicate (use Probe)"
+            note = ("  ·  ID unknown, use Probe"
                     if r["id"] == "-1" else "")
             self.sel_var.set(
-                f"Selected: {r['name']}  (you own {r['count']}){note}")
+                f"{r['name']}  ·  you own {r['count']}{note}")
 
     # -- actions --------------------------------------------------------
 
@@ -220,12 +243,15 @@ class DuplicateItemsTab(BaseTab):
             return
         sel, to_storage = self.sel, 1 if self.store_var.get() else 0
         props = 1 if self.props_var.get() else 0
-        run_async(self, lambda: self._do_dup(client, sel, copies, to_storage, props))
+        run_async(self, lambda: self._do_dup(client, sel, copies, to_storage,
+                                             props))
 
     def _do_dup(self, client, sel, copies, to_storage, props):
         try:
-            res = client.send("dup_do", sel, copies, to_storage, props, timeout=60)
-            self.after(0, lambda: (self.app.set_status(res), self.load_rows_async()))
+            res = client.send("dup_do", sel, copies, to_storage, props,
+                              timeout=60)
+            self.after(0, lambda: (self.app.set_status(res),
+                                   self.load_rows_async()))
         except (BridgeError, BridgeTimeout) as e:
             err = f"Error: {e}"
             self.after(0, lambda: self.app.set_status(err))

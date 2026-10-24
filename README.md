@@ -1,124 +1,131 @@
 # Arisen's Toolbox
 
-Standalone companion app for **Dragon's Dogma 2** (PC/Steam). Press **Start**
-and it handles everything: installs REFramework if missing, installs/updates
-its game-side script, launches the game through Steam, and connects
-automatically once your save is loaded.
+A desktop companion app for **Dragon's Dogma 2** on PC and Steam.
 
-It talks to the game through a small REFramework Lua script (`ddbridge.lua`)
-using plain text files in `reframework/data/ddbridge/` — **no memory scanning,
-no AOB patterns**, so it keeps working after Capcom title updates.
+Press **Start** once. It installs REFramework when it is missing, installs or
+updates the game-side script, launches the game, and connects when your save
+is loaded.
 
-## Features
+![Item Editor](docs/item-editor.png)
 
-- **Item Giver** — searchable list of every item; give any quantity instantly
-- **Item Editor / Item Stats** — inspect and edit items, including hidden
-  special effects (the mechanism behind rings)
-- **Duplicate Items** — one-click duplication
-- **Pawn** — rating & badges editor
-- **Character** — weapon skills, upgraded (Ex) skills, core skills & augments
-- **Mods** — jump tweaks, fast travel (warp to map pin / quest marker via the
-  engine's warp pipeline, 6s fall immunity), faster enemy respawn (custom
-  timers, read/reset game defaults, corpse fast-forward)
-- **Header bar** — target selector, vocation picker, pawn picker, Set Vocation
-  anywhere, Unlock All vocations
+## How it works
 
-## Changelog
+The client does not scan memory and does not use AOB patterns. It talks to the
+game through a small REFramework Lua script (`bridge/data/ddbridge.lua`). The
+two sides exchange plain text files in `reframework/data/ddbridge/`, so game
+title updates do not break the connection.
 
-- **v0.94** - Item Giver list fix (bridge unchanged, v1.89.3): the 300-match display cap is gone and the list now fills in a single bulk assignment through the listbox's listvariable instead of one insert per row, so the full 2,000+ item list actually shows. The status line now reports the whole chain - game count, items.txt lines, parsed, shown - so any loss would be visible instead of silent. New regression tests pin a 2,500-item list end to end through the real widget.
-- **v0.93** - External-review fixes (bridge v1.89.3): Faster Respawn no longer changes the game just by being installed - its hooks stay inert until you press Apply in the Mods tab (Reset turns the override back off). Save-backup safety net hardened: a failed backup copy now BLOCKS the change instead of failing open; a game restart re-arms the backup and clears undo history (old undo values can no longer be written into a new session); the first backup ever made is pinned so the pre-tool baseline can't be pruned away; Restore now only writes into the Steam account the backup came from. A mutating command that times out is removed from cmd.txt and reported as “may or may not have run”. Ctrl+Z no longer fires while you're typing in a text field. “Clean dump files” no longer deletes itemnames.txt (your custom item names live there). The REFramework installer never replaces a dinput8.dll that doesn't look like REFramework (another mod's proxy), logs the installed DLL's SHA256, and moved to bridge/installer.py so it is testable headless. Item Giver validates the item ID against the loaded list and clamps quantity to 1-999 (the Lua clamps too). The heartbeat no longer queues behind long commands, two Toolbox windows can no longer fight over the bridge files, and timeskip_probe is no longer classed read-only (it installs capture hooks). CI now runs deferredcheck.py plus a command-surface cross-check.
-- **v0.92** - Save protection + UX + cuts (bridge v1.89.2): automatic save backup before the first save-writing command of a session (Steam `userdata\<id>\2054970\remote` copied to `%LOCALAPPDATA%\ArisensToolbox\backups`, last 10 kept), plus Backup now / Restore backup (restore backs up the current save first) on the Connection tab; "Undo last change" for edits that record their previous value (rating, badges incl. fill, vocation, renames, weapon-skill level); confirm prompts with counts for bulk writes (unlock all vocations / weapon skills / core skills / augments, fill badges); Export diagnostics (.zip with versions, game build, last 200 commands with timings, log tail). Connection heartbeat dot with auto-reconnect; last tab / window / target / vocation are remembered; item search debounced (150 ms); Item Giver falls back to the on-disk items/enums cache offline; tooltips on save-writing buttons; Ctrl+F search, F5 refresh, Esc closes dialogs, Ctrl+Z undo; Clean dump files + Reset installed files. Cuts: the Signatures tab and the Lua `fn_addr` command are deleted; 19 probe/diagnostic buttons moved to dev mode (`DD2BRIDGE_DEV=1`); `ddbridge.lua` and `dinput8.dll` backups are a single `.bak`, replaced on update. Also fixes the one mixed-version trap in v0.91: a pre-1.89.1 bridge still answers `ping`, so the version check reports the old bridge instead of a 5-minute timeout.
-- **v0.91** - Reliability hardening: one version source (`version.py`); per-game-session boot token rejects replayed `cmd.txt` commands; responses carry an `|END` sentinel and are written temp+rename where possible; UI callbacks are marshalled to the Tk main thread; the REFramework installer validates the zip, backs up the old `dinput8.dll` and swaps atomically; settings and logs live in `%LOCALAPPDATA%\ArisensToolbox`; bridge v1.89.1. Adds CI and unit tests.
-- **v0.90** — Weapon Skills cleanup: removed the temporary diagnostic buttons (Probe skill detail, Dump enabled list, Try fix selected). Kept Probe levels/upgrades, equipment probes, and Add missing entry. Lua unchanged at v1.89.0.
-- **v0.89** — SmokeGiants: "Add missing entry" — if the skill has no EnabledCustomSkills entry (120 has none while all others do), create one (CustomSkillID + Level) and List.Add it, with read-backs; if an entry exists, set its Level field.
-- **v0.88** — SmokeGiants follow-up: read-only "Dump enabled list" (every EnabledCustomSkills entry + ReachLevel) + "Try fix selected" (prepareEnableCustomSkillList, then enable, then level-up + enable again, with read-backs and a check that no other skill changed).
-- **v0.87** — Read-only "Probe skill detail" on Weapon Skills: lists every CustomSkill method + every SkillContext field + LevelNo enum + per-skill getters (for the SmokeGiants diagnosis).
-- **v0.86** — Item rename: the `get_Name` hook now walks the parent type chain to the type that declares it.
-- **v0.85** — "PROBE type" reports the real item-data type and its Name methods.
-- **v0.84** — Rename hook tries both type names and falls back to the real item's type.
-- **v0.83** — "DIAG name" reports hook install status, lookup calls, and matches.
-- **v0.82** — Item rename reworked: hooks `get_Name()` (items have no settable name field).
-- **v0.81** — Rename reads the item ID via `get_Param()` (masters are wrappers).
-- **v0.80** — New "Rename item" card in the Item Editor (per item type). Element % work dropped.
-- **v0.68–v0.79** — Element % investigation (probes + hooks): the displayed +50% comes from a field, not the getters. Dropped in v0.80.
-- **v0.67** — Elements are permanent (restriction hook auto-installs at load).
-- **v0.66** — Element unlock: any weapon can take any element.
-- **v0.65** — Element picker (Fire / Ice / Lightning / Holy) in the Item Editor.
-- **v0.64** — Fall protection scales with drop height (up to 25s).
-- **v0.63** — Terrain API hunt: no ground-height query found.
-- **v0.62** — Pin selection via the game's `IsEnable` flag (no more stale pins).
-- **v0.61** — Altitude discovery probe (`setMapPin` hook).
-- **v0.60** — Warp drops from min 800m when the pin has no altitude.
-- **v0.59** — Pin dump via `GetValue`.
-- **v0.58** — Pin array read via `GetValue` (not `Get`).
-- **v0.57** — Warp-to-pin altitude fixed; `SelectedIcon` y=0 no longer lands under the map.
-- **v0.56** — Pin list type probe.
-- **v0.46–v0.55** — Fast Forward 3 Days investigation: engine time-skip calls threw/crashed, field writes move only the day counter. Parked.
-- **v0.45** — Pin/marker lookup fixed (correct field/method names).
-- **v0.44** — Warp probe deep scan.
-- **v0.43** — Fixed `FT.until` (reserved word) breaking script load; real Lua parse added to the checklist.
-- **v0.42** — Fast travel fixes (fall protection, Diagnose warp, engine time-skip).
-- **v0.41** — Achievements tab removed (no reachable system).
-- **v0.40** — Achievements verdict: Steam Achievement Manager route documented (AppID 2054970).
-- **v0.39** — Achievement probe calibration.
-- **v0.38** — Achievements tab + probe.
-- **v0.37** — Pawn name lookup falls back to the Human's `PawnDataContext`.
-- **v0.36** — "Browse DD2.exe...": direct game launch, remembered.
-- **v0.35** — Name editing rewritten (contexts, language stamping, 12-char cap).
-- **v0.34** — Pawn names via `PawnDataContext`.
-- **v0.33** — `probe_name` diagnostic on the Names tab.
-- **v0.32** — Fixed `get_target` use-before-declaration; scope checker fix.
-- **v0.31** — Fixed 75 deferred `except as e` NameErrors; added `deferredcheck.py`.
-- **v0.29** — Movement Speed sliders (100–300%, pawns, ladder).
-- **v0.28** — New Names tab (rename Arisen, main pawn, hired pawns).
-- **v0.20–v0.27** — Badge investigation: game stores ID + count only; 23 names mapped via darken tests.
+Bulk data (item lists, enums, dumps) travels through sidecar files in the same
+folder. The client caches the item list and enum tables, which keeps the Item
+Giver usable offline.
 
-## Run from source
+## What you can do
 
-Requires Python 3.11+ on Windows (the game is Windows-only).
+| Screen | What it does |
+| --- | --- |
+| **Connection** | Install/update REFramework and the bridge, launch the game, back up and restore saves, export a diagnostics bundle |
+| **Item Giver** | Search every item by name or ID, give it to the inventory or storage, repeat recent gifts |
+| **Item Editor** | Edit weapon-skill slots, appraisal, element and item name |
+| **Item Stats** | Enhancement, base stats and hidden special effects (the mechanism behind rings) |
+| **Duplicate Items** | Copy an inventory entry or double a stack |
+| **Rating & Badges** | Pawn rating and badge progress |
+| **Names** | Rename the Arisen, the main pawn and hired pawns |
+| **Weapon Skills** | Learn or unlearn weapon skills, set levels, and manage six equipped slots per vocation |
+| **Upgraded Skills** | Write `JobNN_ExSkill1..5` into the equipped weapon |
+| **Core Skills & Augments** | Learn or unlearn passive core skills and fill the six augment slots |
+| **Mods** | Jump and fall, movement speed, fast travel, respawn timers, boss summon and nearby-enemy tools |
 
+The target bar at the top selects **Player** or **Main pawn**, the vocation,
+and the pawn to edit. Every screen follows that selection.
+
+## Install and run
+
+Requirements: Windows 10/11, Python 3.10 or newer, and
+[CustomTkinter](requirements.txt).
+
+```bat
+run.bat
 ```
-pip install -r requirements.txt
+
+or, manually:
+
+```bat
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-Or double-click `run.bat` (installs dependencies automatically).
+To build a standalone executable:
 
-## Tests
+```bat
+build.bat
+```
+
+The result is `dist\ArisensToolbox.exe`. The PyInstaller spec bundles
+`bridge/data` and the window icon.
+
+The release folder also contains the matching cheat table under `ct/`. Both front-ends embed the same bridge (v1.89.82).
+
+## Safety
+
+Every feature here edits persistent character state, and DD2 saves are
+fragile. The client therefore:
+
+- backs the save up automatically before the first change of a session;
+- keeps a pinned copy of the very first backup, plus the ten most recent
+  ones, under `%LOCALAPPDATA%\ArisensToolbox\backups`;
+- records the previous value of most edits, so **Undo** in the top bar can
+  revert the last change;
+- stops the change if a save folder exists but the backup copy fails;
+- clears undo history when the game restarts, because old values belong to
+  the old session.
+
+Backups, restores and the diagnostics bundle are on the **Connection** screen.
+The game itself is single-player; none of this is meant for online play.
+
+## Keyboard
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+F` | Jump to Item Giver search |
+| `F5` | Refresh the current screen |
+| `Ctrl+Z` | Undo the last recorded change (ignored while typing) |
+| `Esc` | Close a probe/dump window |
+
+## Project layout
 
 ```
+main.py                 entry point
+version.py              client and bridge versions
+ui/app.py               window shell: command bar, navigation, status bar
+ui/theme.py             design tokens (colour, type, spacing)
+ui/widgets.py           shared components (PageHeader, Section, ListPanel...)
+ui/tabs/*.py            one module per screen
+bridge/protocol.py      file-based IPC with the game
+bridge/installer.py     REFramework download and install
+bridge/safety.py        save discovery, backups, diagnostics
+bridge/game_path.py     install detection, config locations
+bridge/data/ddbridge.lua  game-side script
+tests/                  unit, protocol, safety and UI tests
+```
+
+## Development
+
+```bat
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
+python deferredcheck.py
 ```
 
-CI runs those tests on Windows and syntax-checks `ddbridge.lua` with Lua 5.4
-on Linux; see `.github/workflows/ci.yml`.
+The UI smoke test opens every tab. It runs wherever Tk can create a window
+and skips on headless machines. Set `DD2BRIDGE_DEV=1` (or place a
+`dev_mode.txt` next to the app) to show the developer screens and probe
+buttons.
 
-## Build the .exe (Windows)
+Design decisions are documented in [docs/DESIGN.md](docs/DESIGN.md), the
+v0.177 review notes in [docs/CODE-REVIEW.md](docs/CODE-REVIEW.md). Release
+history lives in [CHANGELOG.md](CHANGELOG.md).
 
-Double-click `build.bat` — installs PyInstaller via pip and builds
-`dist\ArisensToolbox.exe` (~40MB, no console window). Share just the exe;
-first run installs REFramework itself.
+## License
 
-## Protocol
-
-- `ddbridge.lua` (REFramework, in-game) polls ~10x/sec. `ping` returns
-  `pong ddbridge 1.89.1 boot={token}`, where the token is unique to that
-  game process.
-- Client writes `{id}|{command}|{arg}|...|B:{token}|END` to `cmd.txt`
-  (atomic tmp+replace, one in-flight command at a time). Commands carrying a
-  stale or missing token are rejected with `STALE_SESSION` without being
-  executed; the client re-pings and retries once.
-- The game writes `{id}|OK|{payload}|END` or `{id}|ERR|{msg}|END` to
-  `resp.txt`, temp+rename where possible. The `|END` sentinel makes a
-  truncated read detectable, so a partial payload is never treated as a
-  successful result.
-- Bulk data (item lists, dumps) travels through sidecar files in the same dir.
-- Settings and logs: `%LOCALAPPDATA%\ArisensToolbox` (`logs\client.log`).
-  Set `ARISENS_CONFIG_DIR` to override the folder for a portable install.
-
-## Credits
-
-- **Fearless** — item-names list (used with permission)
-- **Dutchysaur** — Set Vocation Anywhere (vocation logic adapted)
-- **Caique Aguiar (OhCato)** — FastTravel Anywhere (warp pipeline adapted)
-- **praydog** — REFramework
+See [LICENSE](LICENSE). This is a fan tool. Dragon's Dogma 2 is a trademark of
+Capcom; this project is not affiliated with or endorsed by Capcom.
