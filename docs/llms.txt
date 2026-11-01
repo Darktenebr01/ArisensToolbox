@@ -1,0 +1,16 @@
+# Arisen's Toolbox
+
+> Free Dragon's Dogma 2 trainer, item editor and Cheat Engine table for Windows 10/11.
+
+Canonical: https://darktenebr01.github.io/ArisensToolbox/
+Source: https://github.com/Darktenebr01/ArisensToolbox
+Download: https://github.com/Darktenebr01/ArisensToolbox/releases/latest
+Nexus Mods: https://www.nexusmods.com/dragonsdogma2/mods/1784
+
+Key pages:
+- Item editor: https://darktenebr01.github.io/ArisensToolbox/item-editor.html
+- Skills: https://darktenebr01.github.io/ArisensToolbox/skills.html
+- Boss summons: https://darktenebr01.github.io/ArisensToolbox/summons.html
+- Cheat table: https://darktenebr01.github.io/ArisensToolbox/cheat-table.html
+- Install: https://darktenebr01.github.io/ArisensToolbox/install.html
+- FAQ: https://darktenebr01.github.io/ArisensToolbox/faq.html

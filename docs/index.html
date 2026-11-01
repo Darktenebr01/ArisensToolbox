@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arisen's Toolbox — DD2 Trainer, Item Editor & Cheat Table</title>
+<meta name="description" content="Free Dragon's Dogma 2 trainer and save editor for PC and Steam. Give items, edit gear and skills, edit pawns, summon bosses, fast travel, and use the matching Cheat Engine table.">
+<link rel="canonical" href="https://darktenebr01.github.io/ArisensToolbox/">
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+<meta name="theme-color" content="#0b0c0e">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Arisen's Toolbox">
+<meta property="og:title" content="Arisen's Toolbox — DD2 Trainer, Item Editor & Cheat Table">
+<meta property="og:description" content="Free Dragon's Dogma 2 trainer and save editor for PC and Steam. Give items, edit gear and skills, edit pawns, summon bosses, fast travel, and use the matching Cheat Engine table.">
+<meta property="og:url" content="https://darktenebr01.github.io/ArisensToolbox/">
+<meta property="og:image" content="https://darktenebr01.github.io/ArisensToolbox/assets/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="Arisen's Toolbox: Dragon's Dogma 2 trainer, item editor and Cheat Engine table">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Arisen's Toolbox — DD2 Trainer, Item Editor & Cheat Table">
+<meta name="twitter:description" content="Free Dragon's Dogma 2 trainer and save editor for PC and Steam. Give items, edit gear and skills, edit pawns, summon bosses, fast travel, and use the matching Cheat Engine table.">
+<meta name="twitter:image" content="https://darktenebr01.github.io/ArisensToolbox/assets/social-preview.png">
+<link rel="icon" href="assets/favicon.png" type="image/png">
+<link rel="stylesheet" href="assets/style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Arisen's Toolbox", "alternateName": ["ArisensToolbox", "Arisen Toolbox", "DD2 Toolbox"], "operatingSystem": "Windows 10, Windows 11", "applicationCategory": "UtilitiesApplication", "applicationSubCategory": "Game trainer and save editor", "softwareVersion": "0.180", "downloadUrl": "https://github.com/Darktenebr01/ArisensToolbox/releases/latest", "installUrl": "https://github.com/Darktenebr01/ArisensToolbox/releases/latest", "url": "https://darktenebr01.github.io/ArisensToolbox/", "description": "Free Dragon's Dogma 2 trainer, item editor and Cheat Engine table. Give items, edit gear and skills, edit pawns, summon bosses, change movement and fast travel, with automatic save backups.", "author": {"@type": "Person", "name": "Darktenebr01", "url": "https://github.com/Darktenebr01/ArisensToolbox"}, "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "screenshot": ["https://darktenebr01.github.io/ArisensToolbox/assets/item-giver.webp", "https://darktenebr01.github.io/ArisensToolbox/assets/weapon-skills.webp", "https://darktenebr01.github.io/ArisensToolbox/assets/core-augments.webp"]}</script>
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": "Is Arisen's Toolbox safe to use?", "acceptedAnswer": {"@type": "Answer", "text": "It edits the loaded save in a single-player game. The app backs up the save before the first change of a session, keeps ten recent backups plus a pinned first backup, and records undo for most edits. Back up your own save as well; any save editor carries risk."}}, {"@type": "Question", "name": "Is Arisen's Toolbox a trainer?", "acceptedAnswer": {"@type": "Answer", "text": "It is a companion and save editor, not a memory scanner. It talks to a REFramework Lua script and changes game state through the game's own classes. That covers trainer-like edits: items, stats, skills, pawns, movement, fast travel and summons."}}, {"@type": "Question", "name": "Does it work offline?", "acceptedAnswer": {"@type": "Answer", "text": "The app connects to the game on your PC through local files in the REFramework data folder. It does not need an online account. The item list is cached after one successful load, so the Item Giver can still show items offline."}}, {"@type": "Question", "name": "Will a Dragon's Dogma 2 update break it?", "acceptedAnswer": {"@type": "Answer", "text": "The file-based bridge is designed to survive game title updates, but REFramework itself and class fields can change. If something stops resolving, update REFramework and the bundled bridge from the Connection screen, then check the release notes."}}, {"@type": "Question", "name": "Does it work with mods?", "acceptedAnswer": {"@type": "Answer", "text": "It works alongside REFramework mods. Load-order and script conflicts are possible with mods that patch the same game classes, so test on a backed-up save."}}]}</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Arisen's Toolbox<small>Dragon's Dogma 2 companion</small></span>
+    </a>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="index.html" aria-current="page">Home</a>
+<a href="item-editor.html">Item editor</a>
+<a href="skills.html">Skills</a>
+<a href="summons.html">Summons</a>
+<a href="cheat-table.html">Cheat table</a>
+<a href="install.html">Install</a>
+<a href="faq.html">FAQ</a>
+    </nav>
+    <div class="header-cta">
+      <a class="btn btn-primary btn-small" href="https://github.com/Darktenebr01/ArisensToolbox/releases/latest">Download</a>
+      <a class="btn btn-ghost btn-small" href="https://www.nexusmods.com/dragonsdogma2/mods/1784" rel="noopener">Nexus</a>
+    </div>
+  </div>
+</header>
+<main id="main">
+
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Dragon's Dogma 2 · PC / Steam</p>
+      <h1>Arisen's Toolbox: a Dragon's Dogma 2 trainer, item editor and cheat table</h1>
+      <p class="lede">Give items, edit gear and stats, learn or unlearn skills, edit pawns,
+      summon bosses, change movement and fast travel, and use the matching Cheat Engine table.
+      Windows 10/11, free, with automatic save backups.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="https://github.com/Darktenebr01/ArisensToolbox/releases/latest">Download the latest release</a>
+        <a class="btn btn-ghost" href="https://www.nexusmods.com/dragonsdogma2/mods/1784" rel="noopener">Get it on Nexus Mods</a>
+      </div>
+      <p class="meta">REFramework-based · no memory scanning · single-player · save backup and undo</p>
+    </div>
+    <figure class="shot">
+      <img src="assets/item-giver.webp" width="1280" height="720"
+        alt="Arisen's Toolbox Item Giver screen showing the Dragon's Dogma 2 item library and a give-item panel">
+      <figcaption>Item Giver: search the item library, then send an item to inventory or storage.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <div class="section-head">
+      <div><h2>What you can do</h2>
+      <p>Everything runs from one window, with a shared Player / Main pawn target and vocation selector.</p></div>
+      <a class="btn btn-ghost btn-small" href="install.html">Install guide</a>
+    </div>
+    <div class="grid">
+      <article class="card"><span class="tag">Items</span>
+        <h3>Item giver and item editor</h3>
+        <p>Search the full item library, give items to inventory or storage, edit weapon skills,
+        appraisal, element and custom names, and duplicate a stack.</p>
+        <a href="item-editor.html">Dragon's Dogma 2 item editor</a></article>
+      <article class="card"><span class="tag">Character</span>
+        <h3>Weapon, core and upgraded skills</h3>
+        <p>Learn or unlearn weapon and core skills, set skill levels, fill augment slots and
+        write ExSkills into the equipped weapon.</p>
+        <a href="skills.html">Skill editor guide</a></article>
+      <article class="card"><span class="tag">Pawns</span>
+        <h3>Pawn rating, badges and names</h3>
+        <p>Edit thumbs-up and hearts, set badge progress, and rename the Arisen, main pawn and
+        hired pawns.</p>
+        <a href="faq.html#pawns">Pawn editing notes</a></article>
+      <article class="card"><span class="tag">World</span>
+        <h3>Boss and monster summons</h3>
+        <p>Summon a chosen boss or monster near an enemy group, with a count for testing.
+        The game still owns spawning and bookkeeping.</p>
+        <a href="summons.html">Summon tool guide</a></article>
+      <article class="card"><span class="tag">Movement</span>
+        <h3>Jump, speed and fast travel</h3>
+        <p>Adjust jump height and air time, disable fall damage, change movement and ladder speed,
+        warp to a map pin or quest marker, and shorten respawn timers.</p>
+        <a href="faq.html#mods">Movement and travel notes</a></article>
+      <article class="card"><span class="tag">Cheat Engine</span>
+        <h3>Matching cheat table</h3>
+        <p>The release folder includes a separate Cheat Engine table with the same bridge and
+        many of the same tools for people who prefer CE.</p>
+        <a href="cheat-table.html">Dragon's Dogma 2 cheat table</a></article>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap split">
+    <div class="prose">
+      <h2>How it works</h2>
+      <p>Arisen's Toolbox does not scan memory or use AOB patterns. It installs a small
+      REFramework Lua script and exchanges plain text files with the game in
+      <code>reframework/data/ddbridge/</code>. Game title updates are less likely to break
+      a file protocol than a hard-coded memory address.</p>
+      <p>The app installs REFramework when it is missing, installs or updates the bridge,
+      launches the game through Steam and connects when a save is loaded. The first save
+      change in a session triggers an automatic backup.</p>
+      <p>Bulk data such as the item list and enum tables travels through sidecar files and is
+      cached locally. After one successful load, the Item Giver can list items without the
+      game running.</p>
+      <div class="note">Single-player only. The tool edits persistent character state; do not
+      use it in online play or on a save you cannot restore.</div>
+    </div>
+    <figure class="shot">
+      <img src="assets/weapon-skills.webp" width="1280" height="720" loading="lazy"
+        alt="Arisen's Toolbox Weapon Skills screen with equipped slots, learn and unlearn buttons, and skill levels">
+      <figcaption>Weapon Skills: learn, unlearn and level skills for the selected vocation.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap split">
+    <div>
+      <h2>Install in four steps</h2>
+      <ol class="steps">
+        <li><strong>Download</strong> the latest release zip from GitHub or the Nexus page.</li>
+        <li><strong>Extract</strong> it to a normal folder you can write to. Do not run it from inside the zip.</li>
+        <li><strong>Run</strong> <code>ArisensToolbox.exe</code> and press <strong>Start</strong> on the Connection screen.</li>
+        <li><strong>Load your save</strong>, then press <strong>Connect</strong>. The first edit creates a backup.</li>
+      </ol>
+      <div class="inline-cta"><a class="btn btn-primary" href="install.html">Full install and troubleshooting guide</a></div>
+    </div>
+    <div class="prose">
+      <h3>Requirements</h3>
+      <ul>
+        <li>Windows 10 or 11, 64-bit</li>
+        <li>Dragon's Dogma 2 on Steam, single-player</li>
+        <li>A local save loaded before you connect</li>
+        <li>Permission to write to the game folder for the REFramework install</li>
+      </ul>
+      <p>Running from source needs Python 3.10+ and CustomTkinter. The release exe is the
+      recommended route for most players.</p>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots">
+  <div class="wrap">
+    <div class="section-head"><div><h2>Screenshots</h2>
+    <p>All screens use the same dark interface and follow the Player / pawn / vocation selection.</p></div></div>
+    <div class="gallery">
+      <figure><img src="assets/item-giver.webp" width="1280" height="720" loading="lazy"
+        alt="Dragon's Dogma 2 item giver with item search and inventory storage buttons">
+        <figcaption>Item Giver</figcaption></figure>
+      <figure><img src="assets/core-augments.webp" width="1280" height="720" loading="lazy"
+        alt="Dragon's Dogma 2 core skills and augment editor with learn and unlearn controls">
+        <figcaption>Core skills and augments</figcaption></figure>
+      <figure><img src="assets/mods.webp" width="1280" height="720" loading="lazy"
+        alt="Dragon's Dogma 2 mods screen with fast travel, enemy respawn and boss summon tools">
+        <figcaption>Fast travel, respawn and boss tools</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="cheat-table">
+  <div class="wrap split">
+    <div class="prose">
+      <h2>Dragon's Dogma 2 cheat table</h2>
+      <p>The release also includes a Cheat Engine table for players who prefer CE. It embeds
+      the same game-side bridge and exposes pawn rating and badges, player tools, weapon and
+      core skills, item giver and editor, duplicate, names, and the movement, travel and boss
+      tools.</p>
+      <p>Use Cheat Engine 7.x, attach it to <code>DD2.exe</code>, then tick the panel entry and
+      press Connect. The table can install or update the bridge from the Connect tab.</p>
+      <div class="inline-cta"><a class="btn btn-primary" href="cheat-table.html">Cheat table setup guide</a></div>
+    </div>
+    <figure class="shot">
+      <img src="assets/core-augments.webp" width="1280" height="720" loading="lazy"
+        alt="Arisen's Toolbox core skills screen, also available through the Dragon's Dogma 2 cheat table">
+      <figcaption>Core skills and augments, available in both the app and the CT.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="section-head"><div><h2>Common questions</h2>
+    <p>Short answers. The full FAQ covers saves, mods, updates and troubleshooting.</p></div>
+    <a class="btn btn-ghost btn-small" href="faq.html">All questions</a></div>
+    <div class="faq">
+      <details><summary>Is Arisen's Toolbox safe to use?</summary><p>It edits the loaded save in a single-player game. The app backs up the save before the first change of a session, keeps ten recent backups plus a pinned first backup, and records undo for most edits. Back up your own save as well; any save editor carries risk.</p></details><details><summary>Is Arisen's Toolbox a trainer?</summary><p>It is a companion and save editor, not a memory scanner. It talks to a REFramework Lua script and changes game state through the game's own classes. That covers trainer-like edits: items, stats, skills, pawns, movement, fast travel and summons.</p></details><details><summary>Does it work offline?</summary><p>The app connects to the game on your PC through local files in the REFramework data folder. It does not need an online account. The item list is cached after one successful load, so the Item Giver can still show items offline.</p></details><details><summary>Will a Dragon's Dogma 2 update break it?</summary><p>The file-based bridge is designed to survive game title updates, but REFramework itself and class fields can change. If something stops resolving, update REFramework and the bundled bridge from the Connection screen, then check the release notes.</p></details><details><summary>Does it work with mods?</summary><p>It works alongside REFramework mods. Load-order and script conflicts are possible with mods that patch the same game classes, so test on a backed-up save.</p></details>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap"><div class="cta">
+    <div><h2>Ready to edit your save?</h2>
+    <p>Download the latest build, or read the install guide first. Back up your save either way.</p></div>
+    <div class="actions" style="margin:0">
+      <a class="btn btn-primary" href="https://github.com/Darktenebr01/ArisensToolbox/releases/latest">Download latest release</a>
+      <a class="btn btn-ghost" href="install.html">Install guide</a>
+    </div>
+  </div></div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span>
+          <span>Arisen's Toolbox<small>Dragon's Dogma 2 companion</small></span></a>
+        <p style="margin:14px 0 0;max-width:38ch">A free Windows companion for Dragon's Dogma 2:
+        item editing, skills, pawns, boss summons and a matching Cheat Engine table.</p>
+      </div>
+      <div>
+        <h3>Pages</h3>
+        <a href="item-editor.html">Item editor</a>
+        <a href="skills.html">Skill editor</a>
+        <a href="summons.html">Boss summons</a>
+        <a href="cheat-table.html">Cheat table</a>
+        <a href="install.html">Install guide</a>
+        <a href="faq.html">FAQ</a>
+      </div>
+      <div>
+        <h3>Links</h3>
+        <a href="https://github.com/Darktenebr01/ArisensToolbox" rel="noopener">GitHub source</a>
+        <a href="https://github.com/Darktenebr01/ArisensToolbox/releases/latest" rel="noopener">Latest release</a>
+        <a href="https://www.nexusmods.com/dragonsdogma2/mods/1784" rel="noopener">Nexus Mods</a>
+        <a href="https://github.com/Darktenebr01/ArisensToolbox/blob/master/CHANGELOG.md" rel="noopener">Changelog</a>
+        <a href="https://github.com/Darktenebr01/ArisensToolbox/blob/master/LICENSE" rel="noopener">License</a>
+      </div>
+    </div>
+    <div class="legal">
+      <span>Unofficial fan tool. Not affiliated with or endorsed by Capcom.
+      Dragon's Dogma 2 is a trademark of Capcom.</span>
+      <span>Windows 10/11 · single-player · free</span>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
